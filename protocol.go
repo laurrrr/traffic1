@@ -154,21 +154,35 @@ type Progress struct {
 	Fraction  float64 `json:"fraction"`
 }
 
-// FinalMsg carries the client's measurements at the end of a run. The server
-// stamps network identity, computes the verdict and persists the result, so
-// that both screens and the history file agree on one set of numbers.
+// FinalMsg carries the client's raw measurements at the end of a run.
+//
+// Deliberately raw: the client sends untrimmed sample windows and untrimmed
+// round-trip times, and the server does all the trimming, percentile and
+// grading maths. That keeps one tested implementation of the statistics rather
+// than a Go copy and a JavaScript copy that can drift apart, and it means the
+// phone, the desktop window and the history file cannot disagree about what a
+// run means. Upload figures are not sent at all — the server measured those
+// itself and keeps them on the session.
 type FinalMsg struct {
-	Streams        int          `json:"streams"`
-	DurationMs     int64        `json:"durationMs"`
-	Download       DirStats     `json:"download"`
-	DownloadSample []Sample     `json:"downloadSamples"`
-	ServerDownload *DirStats    `json:"serverDownload,omitempty"`
-	Upload         DirStats     `json:"upload"`
-	Latency        LatencyReport `json:"latency"`
-	Reliable       bool         `json:"reliable"`
-	Aborted        bool         `json:"aborted"`
-	Caveats        []string     `json:"caveats"`
-	UA             string       `json:"ua"`
+	Streams    int   `json:"streams"`
+	DurationMs int64 `json:"durationMs"`
+
+	// DownloadSamples is the client's aggregate byte count per window, summed
+	// across every stream. The client's counter is authoritative for download.
+	DownloadSamples    []Sample `json:"downloadSamples"`
+	DownloadTotalBytes int64    `json:"downloadTotalBytes"`
+	// ServerDownloadBytes is what the server reported sending, summed over
+	// streams. Kept only to detect and report a discrepancy.
+	ServerDownloadBytes int64 `json:"serverDownloadBytes"`
+
+	RTTIdle     []float64 `json:"rttIdle"`
+	RTTDownload []float64 `json:"rttDownload"`
+	RTTUpload   []float64 `json:"rttUpload"`
+
+	Reliable bool     `json:"reliable"`
+	Aborted  bool     `json:"aborted"`
+	Caveats  []string `json:"caveats"`
+	UA       string   `json:"ua"`
 }
 
 // StoredMsg returns the persisted run plus the previous run on the same
@@ -180,11 +194,15 @@ type StoredMsg struct {
 
 // ObserveEvent is pushed to observer connections.
 type ObserveEvent struct {
-	Type     string     `json:"type"` // state | progress | final
+	Type     string     `json:"type"` // state | progress | final | peers
 	State    string     `json:"state,omitempty"`
 	Peer     *PeerInfo  `json:"peer,omitempty"`
 	Progress *Progress  `json:"progress,omitempty"`
 	Stored   *StoredMsg `json:"stored,omitempty"`
+	// Peers lists remote devices that have the page open but are not running a
+	// test yet. The host screen uses it to say "phone connected" before anyone
+	// presses start.
+	Peers []PeerInfo `json:"peers,omitempty"`
 }
 
 // PeerInfo describes the device currently holding the test lock.

@@ -7,13 +7,16 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 const (
@@ -113,6 +116,16 @@ type Session struct {
 	upSamples map[int][]Sample
 	upTotal   int64
 	upFinal   bool
+	upStats   DirStats
+}
+
+// uploadResult returns the upload figures the server measured for this session.
+// They are read from here rather than from the client's FINAL message: the
+// receiving end is the only one that knows what actually arrived.
+func (sess *Session) uploadResult() (DirStats, int64) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.upStats, sess.upTotal
 }
 
 // Server owns the single-test lock, the observer set and the persisted history.
@@ -127,7 +140,8 @@ type Server struct {
 
 	mu        sync.Mutex
 	active    *Session
-	observers map[*wsConn]struct{}
+	observers map[*wsConn]PeerInfo
+	lanURLs   []string
 }
 
 func newServer(port, defaultStreams int, hist *HistoryStore, network NetworkIdentity, webFS fs.FS) *Server {
@@ -148,7 +162,7 @@ func newServer(port, defaultStreams int, hist *HistoryStore, network NetworkIden
 		history:        hist,
 		network:        network,
 		webFS:          webFS,
-		observers:      make(map[*wsConn]struct{}),
+		observers:      make(map[*wsConn]PeerInfo),
 	}
 	s.upgrader = websocket.Upgrader{
 		ReadBufferSize:    128 * 1024,
@@ -211,7 +225,54 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/config.js", s.handleConfig)
 	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/urls", s.handleURLs)
+	mux.HandleFunc("/qr.png", s.handleQR)
 	return mux
+}
+
+// SetLANURLs records the addresses a phone can use to reach this server, so the
+// host screen can list them and render a QR code.
+func (s *Server) SetLANURLs(urls []string) {
+	s.mu.Lock()
+	s.lanURLs = append([]string(nil), urls...)
+	s.mu.Unlock()
+}
+
+func (s *Server) urls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.lanURLs...)
+}
+
+func (s *Server) handleURLs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"urls": s.urls()})
+}
+
+// handleQR renders the LAN URL as a QR code. Doing this server-side means the
+// frontend needs no QR library, which keeps the "zero CDN, no build step"
+// promise without shipping a few thousand lines of encoder in the page.
+func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
+	urls := s.urls()
+	if len(urls) == 0 {
+		http.Error(w, "no LAN URL available", http.StatusNotFound)
+		return
+	}
+	target := urls[0]
+	if raw := r.URL.Query().Get("i"); raw != "" {
+		if i, err := strconv.Atoi(raw); err == nil && i >= 0 && i < len(urls) {
+			target = urls[i]
+		}
+	}
+	png, err := qrcode.Encode(target, qrcode.Medium, 512)
+	if err != nil {
+		http.Error(w, "qr encode failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(png)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -279,7 +340,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	switch hello.Role {
 	case RoleObserver:
-		s.serveObserver(c)
+		s.serveObserver(c, hello, r)
 	case RoleControl:
 		s.serveControl(c, hello, r)
 	case RoleStream:
@@ -297,7 +358,7 @@ func (s *Server) serveControl(c *wsConn, hello Hello, r *http.Request) {
 		UA:    hello.UA,
 		Label: describeUA(hello.UA),
 	}
-	peer.Local = isPrivateHost(peer.Addr) && strings.HasPrefix(peer.Addr, "127.")
+	peer.Local = isLoopbackAddr(peer.Addr)
 
 	sess, ok := s.claim(hello.SessionID, peer, c)
 	if !ok {
@@ -397,15 +458,24 @@ func (s *Server) serveStream(c *wsConn, hello Hello) {
 	}
 }
 
-func (s *Server) serveObserver(c *wsConn) {
+func (s *Server) serveObserver(c *wsConn, hello Hello, r *http.Request) {
+	peer := PeerInfo{
+		Addr:    hostOnly(r.RemoteAddr),
+		UA:      hello.UA,
+		Label:   describeUA(hello.UA),
+		SinceMs: time.Now().UnixMilli(),
+	}
+	peer.Local = isLoopbackAddr(peer.Addr)
+
 	s.mu.Lock()
-	s.observers[c] = struct{}{}
+	s.observers[c] = peer
 	active := s.active
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.observers, c)
 		s.mu.Unlock()
+		s.broadcastPeers()
 	}()
 
 	_ = c.writeJSON(MsgHelloAck, HelloAck{
@@ -418,6 +488,7 @@ func (s *Server) serveObserver(c *wsConn) {
 		ev.Peer = &p
 	}
 	_ = c.writeJSON(MsgObserve, ev)
+	s.broadcastPeers()
 
 	// Observers only listen; they send PING as a keepalive so the idle timeout
 	// does not close a window that is simply waiting for a phone.
@@ -553,29 +624,43 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 	}
 
 	caveats := append([]string{}, fm.Caveats...)
+
+	// Download: trim slow-start off the head and the ragged final window off the
+	// tail, then summarise. Doing it here rather than in the browser keeps one
+	// tested implementation of these rules.
+	downMeasured := TrimWarmup(TrimTail(fm.DownloadSamples), WarmupMs)
+	download := Summarize(downMeasured, fm.Streams, WarmupMs)
+
+	// Upload was measured by this server, not reported by the client.
+	upload, _ := sess.uploadResult()
+
 	run := Run{
-		SchemaVersion:  historySchemaVersion,
-		ID:             newRunID(),
-		Timestamp:      time.Now(),
-		NetworkKey:     s.network.Key,
-		SSID:           s.network.SSID,
-		Subnet:         s.network.Subnet,
-		Streams:        fm.Streams,
-		DurationMs:     fm.DurationMs,
-		Client:         describeUA(fm.UA),
-		ClientAddr:     sess.Peer.Addr,
-		Download:       fm.Download,
-		Upload:         fm.Upload,
-		ServerDownload: fm.ServerDownload,
-		Latency:        fm.Latency,
-		Reliable:       fm.Reliable,
-		Aborted:        fm.Aborted,
-		PacketLoss:     packetLossNote,
-		WarmupMs:       WarmupMs,
+		SchemaVersion: historySchemaVersion,
+		ID:            newRunID(),
+		Timestamp:     time.Now(),
+		NetworkKey:    s.network.Key,
+		SSID:          s.network.SSID,
+		Subnet:        s.network.Subnet,
+		Streams:       fm.Streams,
+		DurationMs:    fm.DurationMs,
+		Client:        describeUA(fm.UA),
+		ClientAddr:    sess.Peer.Addr,
+		Download:      download,
+		Upload:        upload,
+		Latency: LatencyReport{
+			Idle:           SummarizeLatency(fm.RTTIdle),
+			LoadedDownload: SummarizeLatency(fm.RTTDownload),
+			LoadedUpload:   SummarizeLatency(fm.RTTUpload),
+		},
+		Reliable:   fm.Reliable,
+		Aborted:    fm.Aborted,
+		PacketLoss: packetLossNote,
+		WarmupMs:   WarmupMs,
 	}
 
-	if fm.ServerDownload != nil && fm.ServerDownload.TotalBytes > 0 {
-		run.DownloadDeltaPct = DeltaPct(fm.Download.TotalBytes, fm.ServerDownload.TotalBytes)
+	if fm.ServerDownloadBytes > 0 && fm.DownloadTotalBytes > 0 {
+		run.ServerDownload = &DirStats{TotalBytes: fm.ServerDownloadBytes, Streams: fm.Streams}
+		run.DownloadDeltaPct = DeltaPct(fm.DownloadTotalBytes, fm.ServerDownloadBytes)
 		if math.Abs(run.DownloadDeltaPct) > downloadDeltaTolerance {
 			caveats = append(caveats, fmt.Sprintf(
 				"Serverul a trimis cu %.1f%% mai mult decât a primit clientul; se raportează cifra clientului.",
@@ -583,7 +668,7 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 		}
 	}
 
-	run.Bufferbloat = ComputeBufferbloat(fm.Latency)
+	run.Bufferbloat = ComputeBufferbloat(run.Latency)
 	run.Verdict = BuildVerdict(run.Download, run.Upload, run.Bufferbloat, run.Aborted)
 	run.Caveats = caveats
 
@@ -651,6 +736,24 @@ func (s *Server) currentPeer() *PeerInfo {
 	}
 	p := s.active.Peer
 	return &p
+}
+
+// observerPeers lists remote devices with the page open. Loopback observers are
+// the desktop window itself and are not interesting to report.
+func (s *Server) observerPeers() []PeerInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []PeerInfo{}
+	for _, p := range s.observers {
+		if !p.Local {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (s *Server) broadcastPeers() {
+	s.broadcast(ObserveEvent{Type: "peers", Peers: s.observerPeers()})
 }
 
 func (s *Server) broadcast(ev ObserveEvent) {
@@ -738,6 +841,10 @@ func (sess *Session) endUpload(idx int, samples []Sample, total int64) {
 	measured := TrimWarmup(aggregate, WarmupMs)
 	stats := Summarize(measured, streams, WarmupMs)
 
+	sess.mu.Lock()
+	sess.upStats = stats
+	sess.mu.Unlock()
+
 	res := UpResultMsg{
 		TotalBytes: upTotal,
 		ElapsedMs:  time.Since(start).Milliseconds(),
@@ -756,6 +863,16 @@ func (sess *Session) endUpload(idx int, samples []Sample, total int64) {
 	}
 	log.Printf("upload done: %d MB over %d streams, %d windows measured",
 		upTotal/1024/1024, streams, len(measured))
+}
+
+// isLoopbackAddr reports whether an address belongs to this machine, which is
+// how the desktop window is told apart from a phone on the LAN.
+func isLoopbackAddr(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(addr, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // sanitizeID keeps a client-supplied session ID to a harmless shape.

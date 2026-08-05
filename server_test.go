@@ -354,24 +354,42 @@ func TestFullTestCycle(t *testing.T) {
 		t.Errorf("upload p50 should be positive, got %v", result.Stats.P50Mbps)
 	}
 
-	// 7. FINAL is persisted, graded and echoed back. The server download figure
-	//    here is deliberately 10% above the client's, to prove the mismatch is
-	//    caught and that the client's number is the one reported.
-	serverDown := DirStats{Samples: 8, TotalBytes: 110_000_000, P50Mbps: 550}
+	// 7. FINAL carries raw measurements only; the server does the statistics.
+	//
+	//    Download windows are built so that exactly the first four (1000 ms) are
+	//    warmup and must be discarded, the last one must be dropped as a ragged
+	//    tail, and the four in between are the measurement. The server byte
+	//    count is deliberately 10% above the client's to prove the mismatch is
+	//    caught and that the client's figure is the one reported.
+	downSamples := make([]Sample, 0, 9)
+	for w := 0; w < 9; w++ {
+		bytes := int64(15_000_000) // steady state
+		if w < 4 {
+			bytes = 4_000_000 // slow start
+		}
+		if w == 8 {
+			bytes = 500_000 // ragged final window
+		}
+		downSamples = append(downSamples, Sample{
+			Window: w,
+			AtMs:   int64(w+1) * SampleWindow.Milliseconds(),
+			Bytes:  bytes,
+			Mbps:   Mbps(bytes, SampleWindow),
+		})
+	}
+	const clientTotal = 100_000_000
 	final := FinalMsg{
-		Streams:    1,
-		DurationMs: 12000,
-		Download:   DirStats{Samples: 8, TotalBytes: 100_000_000, P50Mbps: 480, P95Mbps: 520, WarmupMs: WarmupMs},
-		Upload:     result.Stats,
-		Latency: LatencyReport{
-			Idle:           LatencyStats{Count: 50, MinMs: 2, P50Ms: 3, P95Ms: 5, JitterMs: 0.5},
-			LoadedDownload: LatencyStats{Count: 80, MinMs: 4, P50Ms: 30, P95Ms: 45, JitterMs: 6},
-			LoadedUpload:   LatencyStats{Count: 80, MinMs: 4, P50Ms: 20, P95Ms: 28, JitterMs: 4},
-		},
-		ServerDownload: &serverDown,
-		Reliable:       true,
-		Caveats:        []string{},
-		UA:             "Mozilla/5.0 (Linux; Android 14) Chrome/120.0 Mobile Safari/537.36",
+		Streams:             1,
+		DurationMs:          12000,
+		DownloadSamples:     downSamples,
+		DownloadTotalBytes:  clientTotal,
+		ServerDownloadBytes: 110_000_000,
+		RTTIdle:             []float64{2, 3, 3, 3, 4},
+		RTTDownload:         []float64{20, 30, 40, 44, 45},
+		RTTUpload:           []float64{15, 20, 25, 27, 28},
+		Reliable:            true,
+		Caveats:             []string{},
+		UA:                  "Mozilla/5.0 (Linux; Android 14) Chrome/120.0 Mobile Safari/537.36",
 	}
 	sendJSONMsg(t, control, MsgFinal, final)
 
@@ -396,11 +414,29 @@ func TestFullTestCycle(t *testing.T) {
 	if run.WarmupMs != WarmupMs {
 		t.Errorf("warmup not recorded on the run, got %d", run.WarmupMs)
 	}
-	if run.Download.P50Mbps != 480 {
-		t.Errorf("client download figure must be the one reported, got %v", run.Download.P50Mbps)
+	// Four warmup windows and one ragged tail window must have been discarded,
+	// leaving the four steady-state windows. If slow-start leaked in, p50 would
+	// land well below 480 Mbps.
+	if run.Download.Samples != 4 {
+		t.Errorf("expected 4 measured download windows after trimming, got %d", run.Download.Samples)
 	}
+	almost(t, run.Download.P50Mbps, 480, "download p50 after warmup trim")
+	if run.Download.TotalBytes != 60_000_000 {
+		t.Errorf("measured-window bytes: got %d, want 60000000", run.Download.TotalBytes)
+	}
+
+	// Upload comes from what this server actually received, not from anything
+	// the client claimed.
+	if run.Upload.P50Mbps != result.Stats.P50Mbps || run.Upload.Samples != result.Stats.Samples {
+		t.Errorf("upload figures should come from the server's own measurement: %+v vs %+v",
+			run.Upload, result.Stats)
+	}
+
+	// idle p50 = 3, worst loaded p95 = 44.8 -> delta 41.8 -> grade C
+	almost(t, run.Latency.Idle.P50Ms, 3, "idle p50")
+	almost(t, run.Bufferbloat.DeltaMs, 41.8, "bufferbloat delta")
 	if run.Bufferbloat.Grade != "C" {
-		t.Errorf("bufferbloat grade: got %q, want C (45 ms loaded vs 3 ms idle)", run.Bufferbloat.Grade)
+		t.Errorf("bufferbloat grade: got %q, want C", run.Bufferbloat.Grade)
 	}
 	if !strings.Contains(run.Verdict, "bufferbloat moderat") {
 		t.Errorf("verdict should name the bufferbloat level, got %q", run.Verdict)
@@ -450,16 +486,32 @@ func TestFullTestCycle(t *testing.T) {
 
 // ── observers ────────────────────────────────────────────────────────────────
 
+// nextObserve reads the next observer event of a given type. Presence updates
+// ("peers") are emitted whenever any device opens or closes the page, so they
+// can arrive between the events a test cares about.
+func nextObserve(t *testing.T, c *websocket.Conn, wantType string) ObserveEvent {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var ev ObserveEvent
+		if err := json.Unmarshal(expectMsg(t, c, MsgObserve), &ev); err != nil {
+			t.Fatalf("unmarshal observe: %v", err)
+		}
+		if ev.Type == wantType {
+			return ev
+		}
+	}
+	t.Fatalf("no %q event arrived", wantType)
+	return ObserveEvent{}
+}
+
 func TestObserverSeesTestLifecycle(t *testing.T) {
 	rig := newTestRig(t)
 
 	observer := handshake(t, rig.wsURL, Hello{Role: RoleObserver})
 	expectMsg(t, observer, MsgHelloAck)
 
-	var ev ObserveEvent
-	if err := json.Unmarshal(expectMsg(t, observer, MsgObserve), &ev); err != nil {
-		t.Fatalf("unmarshal observe: %v", err)
-	}
+	ev := nextObserve(t, observer, "state")
 	if ev.State != "idle" {
 		t.Fatalf("a fresh observer should see an idle server, got %q", ev.State)
 	}
@@ -470,9 +522,7 @@ func TestObserverSeesTestLifecycle(t *testing.T) {
 	})
 	expectMsg(t, control, MsgHelloAck)
 
-	if err := json.Unmarshal(expectMsg(t, observer, MsgObserve), &ev); err != nil {
-		t.Fatalf("unmarshal observe: %v", err)
-	}
+	ev = nextObserve(t, observer, "state")
 	if ev.State != "running" {
 		t.Fatalf("observer should see the test start, got %q", ev.State)
 	}
@@ -485,10 +535,8 @@ func TestObserverSeesTestLifecycle(t *testing.T) {
 	sendJSONMsg(t, control, MsgProgress, Progress{
 		Phase: PhaseDownload, ElapsedMs: 1250, Mbps: 480, RTTMs: 42, Fraction: 0.4,
 	})
-	if err := json.Unmarshal(expectMsg(t, observer, MsgObserve), &ev); err != nil {
-		t.Fatalf("unmarshal observe: %v", err)
-	}
-	if ev.Type != "progress" || ev.Progress == nil {
+	ev = nextObserve(t, observer, "progress")
+	if ev.Progress == nil {
 		t.Fatalf("expected a progress relay, got %+v", ev)
 	}
 	if ev.Progress.Mbps != 480 || ev.Progress.Phase != PhaseDownload {
@@ -496,9 +544,7 @@ func TestObserverSeesTestLifecycle(t *testing.T) {
 	}
 
 	_ = control.Close()
-	if err := json.Unmarshal(expectMsg(t, observer, MsgObserve), &ev); err != nil {
-		t.Fatalf("unmarshal observe: %v", err)
-	}
+	ev = nextObserve(t, observer, "state")
 	if ev.State != "idle" {
 		t.Errorf("observer should see the test finish, got %q", ev.State)
 	}
@@ -514,12 +560,25 @@ func TestObserverIsNotBlockedByRunningTest(t *testing.T) {
 	observer := handshake(t, rig.wsURL, Hello{Role: RoleObserver})
 	expectMsg(t, observer, MsgHelloAck)
 
-	var ev ObserveEvent
-	if err := json.Unmarshal(expectMsg(t, observer, MsgObserve), &ev); err != nil {
-		t.Fatalf("unmarshal observe: %v", err)
-	}
+	ev := nextObserve(t, observer, "state")
 	if ev.State != "running" || ev.Peer == nil {
 		t.Errorf("a late observer should be told a test is already running, got %+v", ev)
+	}
+}
+
+// A phone that merely opens the page must be announced, so the host screen can
+// say "connected" before anyone presses start.
+func TestObserverPresenceIsAnnounced(t *testing.T) {
+	rig := newTestRig(t)
+
+	watcher := handshake(t, rig.wsURL, Hello{Role: RoleObserver})
+	expectMsg(t, watcher, MsgHelloAck)
+	nextObserve(t, watcher, "state")
+
+	// A loopback observer is the desktop window itself and is not reported.
+	ev := nextObserve(t, watcher, "peers")
+	if len(ev.Peers) != 0 {
+		t.Errorf("loopback observers must not be listed as phones, got %+v", ev.Peers)
 	}
 }
 

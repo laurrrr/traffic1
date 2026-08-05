@@ -57,6 +57,7 @@ func main() {
 	mux := srv.Mux()
 
 	urls := printBanner(addrs, network, *port, historyPath)
+	srv.SetLANURLs(urls)
 
 	if n := startListeners(addrs, *port, mux); n == 0 {
 		log.Fatal("Failed to bind to any LAN address")

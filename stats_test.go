@@ -331,7 +331,10 @@ func TestDeltaPct(t *testing.T) {
 }
 
 func TestFormatters(t *testing.T) {
-	tests := []struct{ in float64; want string }{
+	tests := []struct {
+		in   float64
+		want string
+	}{
 		{480.4, "480 Mbps"},
 		{48.44, "48.4 Mbps"},
 		{4.444, "4.44 Mbps"},

@@ -51,12 +51,12 @@ func TestIsPrivateV6(t *testing.T) {
 		ip   string
 		want bool
 	}{
-		{"fd00::1", true},          // ULA
-		{"fc00::1", true},          // ULA
+		{"fd00::1", true}, // ULA
+		{"fc00::1", true}, // ULA
 		{"fdff:ffff::1", true},
-		{"fe80::1", false},         // link-local: skipped, needs a zone ID in URLs
-		{"2001:db8::1", false},     // documentation/global
-		{"::1", false},             // loopback
+		{"fe80::1", false},     // link-local: skipped, needs a zone ID in URLs
+		{"2001:db8::1", false}, // documentation/global
+		{"::1", false},         // loopback
 		{"fb00::1", false},
 	}
 	for _, tc := range tests {

@@ -1,672 +1,176 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ro">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>LAN Speed Test</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#fff;--fg:#111;--card:#f7f7f7;--border:#e0e0e0;
-  --muted:#777;--accent:#3b82f6;--success:#10b981;
-  --warn:#f59e0b;--err:#ef4444;
-}
-@media(prefers-color-scheme:dark){
-  :root{
-    --bg:#0f0f0f;--fg:#e5e5e5;--card:#1a1a1a;--border:#2a2a2a;
-    --muted:#999;--accent:#60a5fa;--success:#34d399;
-    --warn:#fbbf24;--err:#f87171;
-  }
-}
-body{
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
-  background:var(--bg);color:var(--fg);
-  max-width:480px;margin:0 auto;padding:20px 16px;
-  -webkit-text-size-adjust:100%;-webkit-font-smoothing:antialiased;
-}
-h1{font-size:22px;font-weight:700;text-align:center;margin-bottom:4px}
-.subtitle{font-size:12px;color:var(--muted);text-align:center;margin-bottom:16px}
-#status-bar{text-align:center;margin-bottom:12px}
-#status{font-size:14px;color:var(--muted);transition:color .2s}
-#status.active{color:var(--accent)}
-#status.ok{color:var(--success)}
-#status.bad{color:var(--err)}
-.prog-wrap{height:3px;background:var(--border);border-radius:2px;margin-top:8px;overflow:hidden}
-#progress{height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width .2s}
-#warning{
-  background:rgba(245,158,11,.1);border:1px solid var(--warn);
-  border-radius:8px;padding:10px 14px;margin-bottom:12px;
-  font-size:13px;color:var(--warn);display:none;
-}
-#chart-wrap{position:relative;margin-bottom:16px}
-canvas{width:100%;height:180px;display:block;border-radius:8px}
-.card{
-  background:var(--card);border:1px solid var(--border);
-  border-radius:8px;padding:12px 16px;margin-bottom:10px;
-}
-.card h2{
-  font-size:11px;font-weight:600;text-transform:uppercase;
-  letter-spacing:.5px;margin-bottom:8px;
-}
-.card.lat h2{color:var(--warn)}
-.card.down h2{color:var(--accent)}
-.card.up h2{color:var(--success)}
-.card.loss h2{color:var(--muted)}
-.row{display:flex;justify-content:space-between;padding:3px 0;font-size:14px}
-.row span:first-child{color:var(--muted)}
-.row span:last-child{font-weight:500;font-variant-numeric:tabular-nums}
-.not-measured{
-  font-size:13px;font-weight:600;color:var(--muted);
-  text-align:center;padding:4px 0;
-}
-.note{font-size:11px;color:var(--muted);text-align:center;margin-top:4px;line-height:1.4}
-#actions{display:flex;gap:10px;margin-top:16px}
-button{
-  flex:1;padding:12px;border:none;border-radius:8px;
-  font-size:16px;font-weight:600;cursor:pointer;
-  transition:opacity .15s;-webkit-tap-highlight-color:transparent;
-}
-button:active{opacity:.7}
-button:disabled{opacity:.35;cursor:not-allowed}
-#start-btn{background:var(--accent);color:#fff}
-#export-btn{background:var(--card);color:var(--fg);border:1px solid var(--border);display:none}
-.live-val{font-size:28px;font-weight:700;text-align:center;padding:8px 0;font-variant-numeric:tabular-nums}
-.live-unit{font-size:13px;font-weight:400;color:var(--muted)}
-</style>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>lantest — test de rețea LAN</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M5 22 L11 14 L17 18 L27 7' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
 </head>
 <body>
 
-<h1>LAN Speed Test</h1>
-<p class="subtitle">Laptop ↔ Phone over local network</p>
+<div id="app" data-layout="client" data-state="waiting">
 
-<div id="status-bar">
-  <div id="status">Ready</div>
-  <div class="prog-wrap"><div id="progress"></div></div>
+  <header id="topbar">
+    <div class="brand">
+      <span class="dot" id="conn-dot"></span>
+      <h1>lantest</h1>
+    </div>
+    <div class="topbar-right">
+      <span id="net-label" class="muted"></span>
+      <button id="layout-toggle" class="ghost" type="button" title="Comută între vederea de desktop și cea de telefon">Vedere</button>
+    </div>
+  </header>
+
+  <div id="banner" hidden></div>
+
+  <!-- ── Ecran de start, vederea desktop ─────────────────────────────────── -->
+  <section id="panel-connect">
+    <div class="connect-grid">
+      <div class="qr-card">
+        <img id="qr" alt="Cod QR cu adresa serverului" width="220" height="220">
+        <p class="muted small">Scanează cu telefonul</p>
+      </div>
+
+      <div class="connect-info">
+        <h2>Deschide pe telefon</h2>
+        <ul id="url-list" class="urls"></ul>
+
+        <div id="peer-status" class="peer waiting">
+          <span class="pulse"></span>
+          <span id="peer-text">Aștept telefonul…</span>
+        </div>
+
+        <div class="start-local">
+          <button id="btn-start-local" class="primary" type="button">Testează de pe acest calculator</button>
+          <p class="muted small">Măsoară bucla locală, nu Wi-Fi-ul. Folosește telefonul pentru rezultate reale.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Ecran de start, vederea telefon ─────────────────────────────────── -->
+  <section id="panel-ready">
+    <button id="btn-start" class="huge" type="button">Pornește testul</button>
+    <p class="muted center">Durează în jur de 25 de secunde.<br>Ține ecranul aprins.</p>
+  </section>
+
+  <!-- ── În timpul testului ──────────────────────────────────────────────── -->
+  <section id="panel-live">
+    <div class="live-head">
+      <div>
+        <div id="phase-label" class="phase">Se pregătește…</div>
+        <div id="phase-sub" class="muted small"></div>
+      </div>
+      <div class="live-metrics">
+        <div class="metric">
+          <span class="metric-value" id="live-mbps">--</span>
+          <span class="metric-unit">Mbps</span>
+        </div>
+        <div class="metric latency">
+          <span class="metric-value" id="live-rtt">--</span>
+          <span class="metric-unit">ms</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="progress"><div id="progress-bar"></div></div>
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+  </section>
+
+  <!-- ── Rezultat ────────────────────────────────────────────────────────── -->
+  <section id="panel-result">
+    <div class="verdict-card">
+      <div id="grade" class="grade">–</div>
+      <p id="verdict" class="verdict"></p>
+    </div>
+
+    <div id="comparison" class="comparison" hidden></div>
+
+    <div class="cards">
+      <div class="card down">
+        <h3>Download</h3>
+        <div class="big"><span id="r-down-p50">--</span><span class="unit">Mbps</span></div>
+        <div class="sub muted">p95 <span id="r-down-p95">--</span></div>
+      </div>
+      <div class="card up">
+        <h3>Upload</h3>
+        <div class="big"><span id="r-up-p50">--</span><span class="unit">Mbps</span></div>
+        <div class="sub muted">p95 <span id="r-up-p95">--</span></div>
+      </div>
+      <div class="card lat">
+        <h3>Latență în repaus</h3>
+        <div class="big"><span id="r-lat-idle">--</span><span class="unit">ms</span></div>
+        <div class="sub muted">jitter <span id="r-lat-jitter">--</span></div>
+      </div>
+      <div class="card bloat">
+        <h3>Latență sub sarcină</h3>
+        <div class="big"><span id="r-lat-loaded">--</span><span class="unit">ms</span></div>
+        <div class="sub muted">creștere <span id="r-bloat-delta">--</span></div>
+      </div>
+    </div>
+
+    <div id="caveats" class="caveats" hidden></div>
+
+    <div class="actions">
+      <button id="btn-again" class="primary" type="button">Rulează din nou</button>
+      <button id="btn-json" class="ghost" type="button">Export JSON</button>
+      <button id="btn-png" class="ghost" type="button">Export PNG</button>
+    </div>
+
+    <details id="advanced">
+      <summary>Avansat</summary>
+      <div class="advanced-body">
+        <table class="kv">
+          <tbody>
+            <tr><th>Streamuri paralele</th><td id="a-streams">–</td></tr>
+            <tr><th>Download p50 / p95 / max</th><td id="a-down">–</td></tr>
+            <tr><th>Upload p50 / p95 / max</th><td id="a-up">–</td></tr>
+            <tr><th>Latență repaus min / p50 / p95</th><td id="a-lat-idle">–</td></tr>
+            <tr><th>Latență sub download p50 / p95</th><td id="a-lat-down">–</td></tr>
+            <tr><th>Latență sub upload p50 / p95</th><td id="a-lat-up">–</td></tr>
+            <tr><th>Bufferbloat</th><td id="a-bloat">–</td></tr>
+            <tr><th>Warmup eliminat</th><td id="a-warmup">–</td></tr>
+            <tr><th>Octeți măsurați (client)</th><td id="a-bytes">–</td></tr>
+            <tr><th>Diferență față de contorul serverului</th><td id="a-delta">–</td></tr>
+            <tr><th>Pierdere de pachete</th><td id="a-loss">–</td></tr>
+            <tr><th>Rețea</th><td id="a-net">–</td></tr>
+            <tr><th>Client</th><td id="a-client">–</td></tr>
+            <tr><th>Moment</th><td id="a-time">–</td></tr>
+          </tbody>
+        </table>
+        <p class="muted small">
+          Download-ul este numărat de client, singurul capăt care știe ce a ajuns
+          efectiv. Upload-ul este numărat de server, din același motiv. Primele
+          <span id="a-warmup-inline">1000</span> ms din fiecare direcție sunt
+          eliminate înainte de percentile, pentru că TCP slow-start nu descrie
+          starea stabilă a legăturii.
+        </p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ── Setări ──────────────────────────────────────────────────────────── -->
+  <section id="panel-settings">
+    <label for="streams">Streamuri paralele</label>
+    <div class="segmented" id="streams" role="group" aria-label="Streamuri paralele">
+      <button type="button" data-streams="1">1</button>
+      <button type="button" data-streams="4">4</button>
+      <button type="button" data-streams="8">8</button>
+    </div>
+    <p class="muted small">Un singur stream TCP rareori saturează Wi-Fi-ul modern.</p>
+  </section>
+
+  <!-- ── Istoric ─────────────────────────────────────────────────────────── -->
+  <section id="panel-history">
+    <h2>Rulări anterioare</h2>
+    <div id="history-list" class="history"></div>
+  </section>
+
 </div>
 
-<div id="warning"></div>
-
-<div id="chart-wrap"><canvas id="chart"></canvas></div>
-
-<div id="live-display" style="display:none">
-  <div class="card"><div class="live-val" id="live-val">--</div></div>
-</div>
-
-<div id="results">
-  <div class="card lat" id="lat-card" style="display:none">
-    <h2>Latency</h2>
-    <div class="row"><span>Min</span><span id="lat-min">--</span></div>
-    <div class="row"><span>P50</span><span id="lat-p50">--</span></div>
-    <div class="row"><span>P95</span><span id="lat-p95">--</span></div>
-    <div class="row"><span>Jitter</span><span id="lat-jitter">--</span></div>
-  </div>
-  <div class="card down" id="down-card" style="display:none">
-    <h2>Download</h2>
-    <div class="row"><span>P50</span><span id="down-p50">--</span></div>
-    <div class="row"><span>P95</span><span id="down-p95">--</span></div>
-  </div>
-  <div class="card up" id="up-card" style="display:none">
-    <h2>Upload</h2>
-    <div class="row"><span>P50</span><span id="up-p50">--</span></div>
-    <div class="row"><span>P95</span><span id="up-p95">--</span></div>
-  </div>
-  <div class="card loss" id="loss-card" style="display:none">
-    <h2>Packet Loss</h2>
-    <div class="not-measured">NOT MEASURED</div>
-    <p class="note">TCP hides retransmissions. Use WebRTC mode (coming soon) for real packet loss.</p>
-  </div>
-</div>
-
-<div id="actions">
-  <button id="start-btn" onclick="startTest()">Start Test</button>
-  <button id="export-btn" onclick="exportJSON()">Export JSON</button>
-</div>
-
-<script>
-'use strict';
-var MSG={PING:1,PONG:2,DOWN_START:3,DOWN_DATA:4,DOWN_DONE:5,
-         UP_START:6,UP_DATA:7,UP_DONE:8,RESULT:9,ABORT:10};
-var PING_COUNT=50;
-var SAMPLE_MS=250;
-var MAX_BUFFERED=4*1024*1024;
-var TEST_DURATION=10000;
-var CHUNK_SIZE=65536;
-
-var ws=null;
-var phase='idle';
-var caveats=[];
-var visibilityWarned=false;
-var aborted=false;
-
-var rttValues=[];
-var pendingPong=null;
-
-var downBytes=0,downStart=0,downSamples=[];
-var lastDownBytes=0,lastDownTime=0,downTimer=null;
-var sampleIntervals=[];
-
-var upBytesSent=0,upStart=0;
-var lastUpBytes=0,lastUpTime=0;
-
-var serverDownResult=null,serverUpResult=null;
-var downDoneResolve=null,resultResolve=null;
-
-var chart=null;
-
-var $=function(id){return document.getElementById(id)};
-
-function setStatus(text,cls){
-  var el=$('status');
-  el.textContent=text;
-  el.className=cls||'';
-}
-function setProgress(frac){
-  $('progress').style.width=Math.min(100,Math.max(0,frac*100))+'%';
-}
-function showWarning(msg){
-  var el=$('warning');
-  el.textContent=msg;
-  el.style.display='block';
-}
-function hideWarning(){$('warning').style.display='none'}
-function addCaveat(msg){if(caveats.indexOf(msg)===-1)caveats.push(msg)}
-
-function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}
-
-function percentile(arr,p){
-  if(!arr.length)return 0;
-  var s=arr.slice().sort(function(a,b){return a-b});
-  var k=(p/100)*(s.length-1);
-  var f=Math.floor(k),c=Math.ceil(k);
-  if(f===c)return s[f];
-  return s[f]+(s[c]-s[f])*(k-f);
-}
-function arrMin(a){
-  var m=Infinity;
-  for(var i=0;i<a.length;i++)if(a[i]<m)m=a[i];
-  return m===Infinity?0:m;
-}
-function computeJitter(rtts){
-  if(rtts.length<2)return 0;
-  var sum=0;
-  for(var i=1;i<rtts.length;i++)sum+=Math.abs(rtts[i]-rtts[i-1]);
-  return sum/(rtts.length-1);
-}
-function fmtMs(v){return v<10?v.toFixed(2)+' ms':v.toFixed(1)+' ms'}
-function fmtMbps(v){return v<10?v.toFixed(2)+' Mbps':(v<100?v.toFixed(1)+' Mbps':v.toFixed(0)+' Mbps')}
-
-// ── Chart ──
-function LiveChart(canvas){
-  this.canvas=canvas;
-  this.ctx=canvas.getContext('2d');
-  this.points=[];
-  this.mode=null;
-  this.resize();
-  var self=this;
-  window.addEventListener('resize',function(){self.resize()});
-}
-LiveChart.prototype.resize=function(){
-  var dpr=window.devicePixelRatio||1;
-  var rect=this.canvas.getBoundingClientRect();
-  this.w=rect.width;this.h=rect.height;
-  this.canvas.width=this.w*dpr;
-  this.canvas.height=this.h*dpr;
-  this.ctx.setTransform(dpr,0,0,dpr,0,0);
-  this.draw();
-};
-LiveChart.prototype.setMode=function(m){this.mode=m;this.points=[];this.draw()};
-LiveChart.prototype.addPoint=function(x,y){this.points.push({x:x,y:y});this.draw()};
-LiveChart.prototype.draw=function(){
-  var ctx=this.ctx,w=this.w,h=this.h;
-  if(!w||!h)return;
-  var dark=window.matchMedia('(prefers-color-scheme:dark)').matches;
-  var pad={t:24,r:12,b:28,l:52};
-  var pw=w-pad.l-pad.r, ph=h-pad.t-pad.b;
-
-  ctx.clearRect(0,0,w,h);
-  ctx.fillStyle=dark?'#1a1a1a':'#f5f5f5';
-  ctx.fillRect(0,0,w,h);
-
-  if(!this.points.length){
-    ctx.fillStyle=dark?'#555':'#aaa';
-    ctx.font='13px -apple-system,system-ui,sans-serif';
-    ctx.textAlign='center';
-    ctx.fillText('Waiting for data…',w/2,h/2);
-    return;
-  }
-
-  var xMin=this.points[0].x, xMax=this.points[this.points.length-1].x;
-  if(xMax<=xMin)xMax=xMin+1;
-  var yMax=0;
-  for(var i=0;i<this.points.length;i++)if(this.points[i].y>yMax)yMax=this.points[i].y;
-  yMax=yMax*1.15||1;
-
-  var sx=function(x){return pad.l+((x-xMin)/(xMax-xMin))*pw};
-  var sy=function(y){return pad.t+ph-(y/yMax)*ph};
-
-  ctx.strokeStyle=dark?'#2a2a2a':'#e0e0e0';
-  ctx.lineWidth=0.5;
-  for(var g=0;g<=4;g++){
-    var gy=pad.t+(ph/4)*g;
-    ctx.beginPath();ctx.moveTo(pad.l,gy);ctx.lineTo(pad.l+pw,gy);ctx.stroke();
-  }
-
-  var colors={
-    latency:{line:'#f59e0b',fill:dark?'rgba(245,158,11,.15)':'rgba(245,158,11,.1)'},
-    download:{line:'#3b82f6',fill:dark?'rgba(59,130,246,.15)':'rgba(59,130,246,.1)'},
-    upload:{line:'#10b981',fill:dark?'rgba(16,185,129,.15)':'rgba(16,185,129,.1)'}
-  };
-  var c=colors[this.mode]||colors.download;
-
-  ctx.fillStyle=c.fill;
-  ctx.beginPath();
-  ctx.moveTo(sx(this.points[0].x),sy(0));
-  for(var i=0;i<this.points.length;i++)ctx.lineTo(sx(this.points[i].x),sy(this.points[i].y));
-  ctx.lineTo(sx(this.points[this.points.length-1].x),sy(0));
-  ctx.fill();
-
-  ctx.strokeStyle=c.line;ctx.lineWidth=2;ctx.lineJoin='round';
-  ctx.beginPath();
-  for(var i=0;i<this.points.length;i++){
-    i===0?ctx.moveTo(sx(this.points[i].x),sy(this.points[i].y)):ctx.lineTo(sx(this.points[i].x),sy(this.points[i].y));
-  }
-  ctx.stroke();
-
-  if(this.mode==='latency'){
-    ctx.fillStyle=c.line;
-    for(var i=0;i<this.points.length;i++){
-      ctx.beginPath();ctx.arc(sx(this.points[i].x),sy(this.points[i].y),2.5,0,Math.PI*2);ctx.fill();
-    }
-  }
-
-  ctx.fillStyle=dark?'#777':'#666';
-  ctx.font='10px -apple-system,system-ui,sans-serif';
-  ctx.textAlign='right';
-  var yUnit=this.mode==='latency'?' ms':' Mbps';
-  for(var g=0;g<=4;g++){
-    var val=yMax*(4-g)/4;
-    var lbl=val<10?val.toFixed(1):val.toFixed(0);
-    ctx.fillText(lbl+(g===0?yUnit:''),pad.l-4,pad.t+(ph/4)*g+3);
-  }
-
-  ctx.textAlign='center';
-  for(var g=0;g<=4;g++){
-    var xv=xMin+(xMax-xMin)*g/4;
-    var xl=this.mode==='latency'?xv.toFixed(0):xv.toFixed(1);
-    ctx.fillText(xl+(this.mode==='latency'?'':'s'),pad.l+(pw/4)*g,h-pad.b+14);
-  }
-
-  ctx.fillStyle=c.line;
-  ctx.font='bold 11px -apple-system,system-ui,sans-serif';
-  ctx.textAlign='left';
-  var labels={latency:'Latency (ms)',download:'Download (Mbps)',upload:'Upload (Mbps)'};
-  ctx.fillText(labels[this.mode]||'',pad.l,pad.t-8);
-};
-
-// ── WebSocket ──
-function connect(){
-  return new Promise(function(resolve,reject){
-    var url='ws://'+location.host+'/ws';
-    ws=new WebSocket(url);
-    ws.binaryType='arraybuffer';
-    ws.onopen=function(){resolve()};
-    ws.onerror=function(){reject(new Error('WebSocket connection failed'))};
-    ws.onclose=handleClose;
-    ws.onmessage=handleMessage;
-  });
-}
-
-function sendBin(type,payload){
-  if(!ws||ws.readyState!==WebSocket.OPEN)return;
-  if(!payload||!payload.length){
-    ws.send(new Uint8Array([type]));
-    return;
-  }
-  var msg=new Uint8Array(1+payload.length);
-  msg[0]=type;msg.set(payload,1);
-  ws.send(msg);
-}
-function sendJSONMsg(type,obj){
-  sendBin(type,new TextEncoder().encode(JSON.stringify(obj)));
-}
-
-function handleMessage(evt){
-  var data=new Uint8Array(evt.data);
-  if(!data.length)return;
-  var type=data[0], payload=data.subarray(1);
-  switch(type){
-    case MSG.PONG:onPong(payload);break;
-    case MSG.DOWN_DATA:onDownData(payload);break;
-    case MSG.DOWN_DONE:onDownDone(payload);break;
-    case MSG.RESULT:onUpResult(payload);break;
-    case MSG.ABORT:onAbort();break;
-  }
-}
-
-function handleClose(){
-  if(phase!=='idle'&&phase!=='done'&&phase!=='aborted'){
-    aborted=true;
-    addCaveat('Connection lost mid-test (screen locked?)');
-    phase='aborted';
-    setStatus('Aborted — connection lost','bad');
-    $('start-btn').disabled=false;
-    $('start-btn').textContent='Run Again';
-    clearInterval(downTimer);
-    if(pendingPong){var pp=pendingPong;pendingPong=null;pp(0)}
-    if(downDoneResolve){var dd=downDoneResolve;downDoneResolve=null;dd(null)}
-    if(resultResolve){var rr=resultResolve;resultResolve=null;rr(null)}
-  }
-}
-
-// ── Latency ──
-function runLatency(){
-  phase='latency';
-  rttValues=[];
-  chart.setMode('latency');
-  setStatus('Testing latency…','active');
-  $('lat-card').style.display='block';
-  $('live-display').style.display='block';
-
-  var idx=0;
-  function next(){
-    if(aborted)return Promise.resolve();
-    if(idx>=PING_COUNT){
-      $('live-display').style.display='none';
-      return Promise.resolve();
-    }
-    return sendPing().then(function(rtt){
-      rttValues.push(rtt);
-      chart.addPoint(idx+1,rtt);
-      setProgress((idx+1)/PING_COUNT);
-      $('live-val').innerHTML=fmtMs(rtt).replace(' ms','<span class="live-unit"> ms</span>');
-      $('lat-min').textContent=fmtMs(arrMin(rttValues));
-      $('lat-p50').textContent=fmtMs(percentile(rttValues,50));
-      $('lat-p95').textContent=fmtMs(percentile(rttValues,95));
-      $('lat-jitter').textContent=fmtMs(computeJitter(rttValues));
-      idx++;
-      return sleep(20).then(next);
-    });
-  }
-  return next();
-}
-
-function sendPing(){
-  return new Promise(function(resolve,reject){
-    pendingPong=resolve;
-    var buf=new ArrayBuffer(9);
-    var v=new DataView(buf);
-    v.setUint8(0,MSG.PING);
-    v.setFloat64(1,performance.now());
-    ws.send(buf);
-    setTimeout(function(){
-      if(pendingPong===resolve){pendingPong=null;reject(new Error('PONG timeout'))}
-    },5000);
-  });
-}
-
-function onPong(payload){
-  var v=new DataView(payload.buffer,payload.byteOffset,payload.byteLength);
-  var sent=v.getFloat64(0);
-  var rtt=performance.now()-sent;
-  if(pendingPong){var cb=pendingPong;pendingPong=null;cb(rtt)}
-}
-
-// ── Download ──
-function runDownload(){
-  phase='download';
-  chart.setMode('download');
-  setStatus('Testing download…','active');
-  $('down-card').style.display='block';
-  $('live-display').style.display='block';
-  $('live-val').innerHTML='--<span class="live-unit"> Mbps</span>';
-
-  downBytes=0;downSamples=[];
-  lastDownBytes=0;lastDownTime=performance.now();
-  downStart=lastDownTime;sampleIntervals=[];
-
-  var p=new Promise(function(resolve){downDoneResolve=resolve});
-  downTimer=setInterval(sampleDown,SAMPLE_MS);
-  sendJSONMsg(MSG.DOWN_START,{durationMs:TEST_DURATION,chunkBytes:CHUNK_SIZE});
-  return p.then(function(serverStats){
-    clearInterval(downTimer);
-    sampleDown();
-    serverDownResult=serverStats;
-    displayDownloadResults();
-    $('live-display').style.display='none';
-  });
-}
-
-function onDownData(payload){downBytes+=payload.length}
-function onDownDone(payload){
-  var json=JSON.parse(new TextDecoder().decode(payload));
-  if(downDoneResolve){var cb=downDoneResolve;downDoneResolve=null;cb(json)}
-}
-
-function sampleDown(){
-  var now=performance.now();
-  var dt=now-lastDownTime;
-  var db=downBytes-lastDownBytes;
-  if(lastDownTime>downStart&&dt>0)sampleIntervals.push(dt);
-  if(dt>10){
-    var mbps=(db*8)/(dt/1000)/1e6;
-    downSamples.push({time:(now-downStart)/1000,mbps:mbps});
-    chart.addPoint((now-downStart)/1000,mbps);
-    $('live-val').innerHTML=fmtMbps(mbps).replace(' Mbps','<span class="live-unit"> Mbps</span>');
-    lastDownBytes=downBytes;lastDownTime=now;
-  }
-  setProgress(Math.min(1,(now-downStart)/TEST_DURATION));
-}
-
-function displayDownloadResults(){
-  var mbps=downSamples.map(function(s){return s.mbps});
-  $('down-p50').textContent=fmtMbps(percentile(mbps,50));
-  $('down-p95').textContent=fmtMbps(percentile(mbps,95));
-}
-
-// ── Upload ──
-function runUpload(){
-  phase='upload';
-  chart.setMode('upload');
-  setStatus('Testing upload…','active');
-  $('up-card').style.display='block';
-  $('live-display').style.display='block';
-  $('live-val').innerHTML='--<span class="live-unit"> Mbps</span>';
-
-  upBytesSent=0;
-  lastUpBytes=0;lastUpTime=performance.now();
-  upStart=lastUpTime;
-
-  var uploadBuf=new Uint8Array(1+CHUNK_SIZE);
-  uploadBuf[0]=MSG.UP_DATA;
-  crypto.getRandomValues(uploadBuf.subarray(1));
-
-  sendJSONMsg(MSG.UP_START,{durationMs:TEST_DURATION});
-
-  var deadline=performance.now()+TEST_DURATION;
-
-  function sendBatch(){
-    if(aborted||performance.now()>=deadline||!ws||ws.readyState!==WebSocket.OPEN){
-      finishUpload();return;
-    }
-    var batchEnd=Math.min(performance.now()+25,deadline);
-    while(performance.now()<batchEnd&&ws.bufferedAmount<MAX_BUFFERED&&ws.readyState===WebSocket.OPEN){
-      ws.send(uploadBuf);
-      upBytesSent+=CHUNK_SIZE;
-    }
-    var now=performance.now();
-    if(now-lastUpTime>=SAMPLE_MS){
-      var dt=now-lastUpTime;
-      var db=upBytesSent-lastUpBytes;
-      var mbps=(db*8)/(dt/1000)/1e6;
-      chart.addPoint((now-upStart)/1000,mbps);
-      $('live-val').innerHTML=fmtMbps(mbps).replace(' Mbps','<span class="live-unit"> Mbps</span>');
-      lastUpBytes=upBytesSent;lastUpTime=now;
-    }
-    setProgress(Math.min(1,(now-upStart)/TEST_DURATION));
-
-    if(ws.bufferedAmount>MAX_BUFFERED){
-      setTimeout(sendBatch,10);
-    }else{
-      setTimeout(sendBatch,0);
-    }
-  }
-
-  return new Promise(function(resolve){
-    resultResolve=resolve;
-    sendBatch();
-  });
-}
-
-function finishUpload(){
-  if(ws&&ws.readyState===WebSocket.OPEN)sendBin(MSG.UP_DONE);
-}
-
-function onUpResult(payload){
-  var json=JSON.parse(new TextDecoder().decode(payload));
-  serverUpResult=json;
-  $('live-display').style.display='none';
-  displayUploadResults();
-  if(resultResolve){var cb=resultResolve;resultResolve=null;cb(json)}
-}
-
-function displayUploadResults(){
-  if(!serverUpResult||!serverUpResult.samples)return;
-  var mbps=serverUpResult.samples.map(function(s){return s.mbps});
-  if(!mbps.length)return;
-  $('up-p50').textContent=fmtMbps(percentile(mbps,50));
-  $('up-p95').textContent=fmtMbps(percentile(mbps,95));
-}
-
-function onAbort(){
-  aborted=true;phase='aborted';
-  setStatus('Aborted by server','bad');
-}
-
-// ── Visibility ──
-document.addEventListener('visibilitychange',function(){
-  if(document.visibilityState!=='visible'&&phase!=='idle'&&phase!=='done'&&phase!=='aborted'){
-    if(!visibilityWarned){
-      visibilityWarned=true;
-      addCaveat('Tab became hidden during test — results may be unreliable');
-      showWarning('⚠ Tab was hidden during the test — results are marked unreliable');
-    }
-  }
-});
-
-window.onbeforeunload=function(e){
-  if(phase!=='idle'&&phase!=='done'&&phase!=='aborted'){
-    e.preventDefault();e.returnValue='';
-  }
-};
-
-// ── Main runner ──
-function startTest(){
-  caveats=[];aborted=false;visibilityWarned=false;
-  serverDownResult=null;serverUpResult=null;
-  hideWarning();
-  $('lat-card').style.display='none';
-  $('down-card').style.display='none';
-  $('up-card').style.display='none';
-  $('loss-card').style.display='none';
-  $('export-btn').style.display='none';
-  $('live-display').style.display='none';
-  $('start-btn').disabled=true;
-  $('start-btn').textContent='Testing…';
-  setProgress(0);
-
-  setStatus('Connecting…','active');
-  connect().then(function(){
-    return runLatency();
-  }).then(function(){
-    if(aborted)return;
-    return runDownload();
-  }).then(function(){
-    if(aborted)return;
-    return runUpload();
-  }).then(function(){
-    if(aborted)return;
-    checkSampleJitter();
-    phase='done';
-    $('loss-card').style.display='block';
-    setStatus('Complete','ok');
-    $('export-btn').style.display='block';
-  }).catch(function(err){
-    if(!aborted){
-      aborted=true;
-      addCaveat('Error: '+err.message);
-      phase='aborted';
-      setStatus('Error: '+err.message,'bad');
-    }
-  }).then(function(){
-    setProgress(0);
-    $('start-btn').disabled=false;
-    $('start-btn').textContent='Run Again';
-    if(ws){try{ws.close(1000)}catch(e){}ws=null}
-  });
-}
-
-function checkSampleJitter(){
-  if(sampleIntervals.length<2)return;
-  var maxDev=0;
-  for(var i=0;i<sampleIntervals.length;i++){
-    var d=Math.abs(sampleIntervals[i]-SAMPLE_MS);
-    if(d>maxDev)maxDev=d;
-  }
-  if(maxDev>50){
-    addCaveat('Browser throttled sampling (max interval deviation: '+maxDev.toFixed(0)+'ms from '+SAMPLE_MS+'ms target)');
-    showWarning('Sample interval jitter: '+maxDev.toFixed(0)+'ms — browser may be throttling. Numbers are suspect.');
-  }
-}
-
-// ── Export ──
-function exportJSON(){
-  var downMbps=downSamples.map(function(s){return s.mbps});
-  var upMbps=serverUpResult?serverUpResult.samples.map(function(s){return s.mbps}):[];
-
-  var result={
-    schema_version:1,
-    timestamp:new Date().toISOString(),
-    latency:{
-      pings:rttValues.length,
-      min_ms:round2(arrMin(rttValues)),
-      p50_ms:round2(percentile(rttValues,50)),
-      p95_ms:round2(percentile(rttValues,95)),
-      jitter_ms:round2(computeJitter(rttValues))
-    },
-    download:{
-      duration_ms:serverDownResult?serverDownResult.elapsedMs:0,
-      total_bytes:serverDownResult?serverDownResult.totalBytes:0,
-      p50_mbps:round2(percentile(downMbps,50)),
-      p95_mbps:round2(percentile(downMbps,95)),
-      server_stalls:serverDownResult?serverDownResult.stalls:[]
-    },
-    upload:{
-      duration_ms:serverUpResult?serverUpResult.elapsedMs:0,
-      total_bytes:serverUpResult?serverUpResult.totalBytes:0,
-      p50_mbps:round2(percentile(upMbps,50)),
-      p95_mbps:round2(percentile(upMbps,95)),
-      measurement_source:'server'
-    },
-    packet_loss:'NOT MEASURED (TCP hides retransmissions)',
-    reliable:!visibilityWarned&&!aborted,
-    aborted:aborted,
-    caveats:caveats
-  };
-
-  var blob=new Blob([JSON.stringify(result,null,2)],{type:'application/json'});
-  var url=URL.createObjectURL(blob);
-  var a=document.createElement('a');
-  a.href=url;
-  a.download='lantest-'+new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)+'.json';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(function(){URL.revokeObjectURL(url)},10000);
-}
-function round2(v){return Math.round(v*100)/100}
-
-// ── Init ──
-chart=new LiveChart($('chart'));
-</script>
+<script src="app.js"></script>
 </body>
 </html>
