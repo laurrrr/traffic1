@@ -1,1 +1,10 @@
+# Build artefacts. `go build ./...` names the binary after the directory, so
+# the module name is ignored alongside the intended output names.
 lantest
+lantest-desktop
+lantest-desktop.exe
+traffic1
+traffic1.exe
+
+# Local run history, if anyone points -history at the working tree.
+history.json
