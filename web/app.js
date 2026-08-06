@@ -1250,6 +1250,7 @@ async function startTest() {
     renderResult(stored);
     setState('done');
     loadHistory();
+    loadLink();
   } catch (err) {
     handleRunError(err);
   } finally {
@@ -1493,6 +1494,22 @@ function renderAdvanced(r) {
     ' ms (' + r.latency.loaded_download.count + '/' + r.latency.loaded_download.sent + ' răspunsuri)');
   text('a-lat-up', fmtMs(r.latency.loaded_upload.p50_ms) + ' / ' + fmtMs(r.latency.loaded_upload.p95_ms) +
     ' ms (' + r.latency.loaded_upload.count + '/' + r.latency.loaded_upload.sent + ' răspunsuri)');
+  var link = r.link || {};
+  text('a-link', link.type === 'wifi'
+    ? 'Wi-Fi' + (link.ssid ? ' · ' + link.ssid : '') + (link.interface ? ' (' + link.interface + ')' : '')
+    : link.type === 'ethernet'
+      ? 'Cablu' + (link.link_speed_mbps ? ' · ' + link.link_speed_mbps + ' Mbps' : '') +
+        (link.interface ? ' (' + link.interface + ')' : '')
+      : 'necunoscut');
+  text('a-radio', link.type === 'wifi'
+    ? [link.band, link.channel ? 'canal ' + link.channel : '', link.width_mhz ? link.width_mhz + ' MHz' : '',
+       link.phy_mode, link.signal_dbm ? link.signal_dbm + ' dBm' : (link.signal_percent ? link.signal_percent + '%' : '')]
+      .filter(Boolean).join(' · ') || '–'
+    : 'nu se aplică (cablu)');
+  text('a-phyrate', (link.tx_rate_mbps || link.rx_rate_mbps)
+    ? fmtMbps(link.tx_rate_mbps || 0) + ' tx / ' + fmtMbps(link.rx_rate_mbps || 0) + ' rx Mbps (negociată, nu măsurată)'
+    : '–');
+
   text('a-mode', (r.mode === MODE_MANUAL ? 'manual, până la Stop' : 'automat, 10 s pe direcție') +
     ' · ' + directionLabel(r.direction || DIR_BOTH));
   text('a-frames', fmtCount((r.frames && r.frames.download_count) || 0) + ' / ' +
@@ -1939,6 +1956,86 @@ function load(key) {
   try { return localStorage.getItem(key); } catch (e) { return null; }
 }
 
+// ── link panel ──────────────────────────────────────────────────────────────
+
+// renderLink shows how the machine running the server is attached. It is
+// context for reading a result: the same SSID on 2.4 GHz and on 5 GHz are
+// different networks as far as throughput is concerned.
+function renderLink(link, summary) {
+  var card = document.querySelector('.link-card');
+  if (!card) return;
+  link = link || {};
+
+  var wifi = link.type === 'wifi';
+  var wired = link.type === 'ethernet';
+  card.className = 'link-card' + (wifi ? ' wifi' : wired ? ' ethernet' : '');
+  text('link-icon', wifi ? '📶' : wired ? '🔌' : '?');
+
+  text('link-title', wifi
+    ? (link.ssid || 'Wi-Fi (SSID necunoscut)')
+    : wired ? 'Conexiune prin cablu' : 'Tip de legătură necunoscut');
+  text('link-sub', summary || '');
+
+  var rows = [];
+  rows.push(['Tip', wifi ? 'Wi-Fi' : wired ? 'Cablu' : 'necunoscut']);
+  if (link.interface) rows.push(['Interfață', link.interface]);
+
+  if (wifi) {
+    if (link.band) rows.push(['Bandă', link.band]);
+    if (link.channel) {
+      rows.push(['Canal', String(link.channel) + (link.width_mhz ? ' · ' + link.width_mhz + ' MHz' : '')]);
+    }
+    if (link.phy_mode) rows.push(['Standard', link.phy_mode]);
+    if (link.freq_mhz) rows.push(['Frecvență', link.freq_mhz + ' MHz']);
+    if (link.signal_dbm) rows.push(['Semnal', link.signal_dbm + ' dBm' + signalQuality(link.signal_dbm)]);
+    else if (link.signal_percent) rows.push(['Semnal', link.signal_percent + '%']);
+    if (link.tx_rate_mbps || link.rx_rate_mbps) {
+      rows.push(['Rată radio', [link.tx_rate_mbps, link.rx_rate_mbps]
+        .filter(Boolean).map(function (v) { return fmtMbps(v); }).join(' / ') + ' Mbps']);
+    }
+    if (link.security) rows.push(['Securitate', link.security]);
+    if (link.bssid) rows.push(['BSSID', link.bssid]);
+  } else if (wired) {
+    if (link.link_speed_mbps) rows.push(['Viteză port', link.link_speed_mbps + ' Mbps']);
+    if (link.duplex) rows.push(['Duplex', link.duplex]);
+  }
+
+  var html = '';
+  for (var i = 0; i < rows.length; i++) {
+    html += '<div><dt>' + escapeHTML(rows[i][0]) + '</dt><dd>' + escapeHTML(rows[i][1]) + '</dd></div>';
+  }
+  $('link-details').innerHTML = html;
+
+  var note = $('link-note');
+  var msg = link.note || '';
+  // The radio numbers describe the ceiling of the link, not the test result;
+  // saying so stops "866 Mbps radio rate" being read as a measurement.
+  if (wifi && (link.tx_rate_mbps || link.rx_rate_mbps)) {
+    msg = (msg ? msg + ' ' : '') +
+      'Rata radio e viteza negociată a legăturii, nu ce a măsurat testul.';
+  }
+  note.textContent = msg;
+  note.hidden = !msg;
+}
+
+function signalQuality(dbm) {
+  if (dbm >= -55) return ' (excelent)';
+  if (dbm >= -65) return ' (bun)';
+  if (dbm >= -75) return ' (slab)';
+  return ' (foarte slab)';
+}
+
+async function loadLink() {
+  try {
+    var resp = await fetch('api/link', { cache: 'no-store' });
+    if (!resp.ok) return;
+    var body = await resp.json();
+    renderLink(body.link, body.summary);
+  } catch (e) {
+    // Diagnostics are optional; failing to read them must not break the page.
+  }
+}
+
 async function loadURLs() {
   try {
     var resp = await fetch('api/urls', { cache: 'no-store' });
@@ -2048,6 +2145,7 @@ function init() {
   });
 
   loadURLs();
+  loadLink();
   loadHistory();
   startObserving();
 }

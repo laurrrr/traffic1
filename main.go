@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -52,11 +53,18 @@ func main() {
 		log.Fatalf("embedded assets: %v", err)
 	}
 
-	network := identifyNetwork(addrs)
-	srv := newServer(*port, *streams, hist, network, content)
+	// Probe the link once before the banner so it can be printed, then keep it
+	// fresh in the background. A laptop that moves from cable to Wi-Fi
+	// mid-session should report what it is on now.
+	link := NewLinkMonitor(primaryIface(addrs))
+	linkInfo := link.Refresh()
+	link.Start(30 * time.Second)
+
+	network := identifyNetwork(addrs, linkInfo.SSID)
+	srv := newServer(*port, *streams, hist, network, link, content)
 	mux := srv.Mux()
 
-	urls := printBanner(addrs, network, *port, historyPath)
+	urls := printBanner(addrs, network, linkInfo, *port, historyPath)
 	srv.SetLANURLs(urls)
 
 	if n := startListeners(addrs, *port, mux); n == 0 {
@@ -92,7 +100,21 @@ func startListeners(addrs []LANAddr, port int, handler http.Handler) int {
 	return live
 }
 
-func printBanner(addrs []LANAddr, network NetworkIdentity, port int, historyPath string) []string {
+// primaryIface is the interface carrying the first private IPv4 address, which
+// is the one a phone will actually reach the server over.
+func primaryIface(addrs []LANAddr) string {
+	for _, a := range addrs {
+		if a.IP.To4() != nil {
+			return a.Iface
+		}
+	}
+	if len(addrs) > 0 {
+		return addrs[0].Iface
+	}
+	return ""
+}
+
+func printBanner(addrs []LANAddr, network NetworkIdentity, link LinkInfo, port int, historyPath string) []string {
 	urls := make([]string, 0, len(addrs))
 	for _, a := range addrs {
 		urls = append(urls, formatURL(a.IP, port))
@@ -102,12 +124,20 @@ func printBanner(addrs []LANAddr, network NetworkIdentity, port int, historyPath
 	fmt.Println("  lantest — test de throughput și latență în LAN")
 	fmt.Println("  " + strings.Repeat("─", 46))
 	if network.SSID != "" {
-		fmt.Printf("  Rețea: %s (%s)\n", network.SSID, network.Subnet)
+		fmt.Printf("  Rețea:    %s (%s)\n", network.SSID, network.Subnet)
 	} else if network.Subnet != "" {
-		fmt.Printf("  Rețea: %s\n", network.Subnet)
+		fmt.Printf("  Rețea:    %s\n", network.Subnet)
+	}
+	fmt.Printf("  Legătură: %s", link.Describe())
+	if link.Interface != "" {
+		fmt.Printf("  [%s]", link.Interface)
+	}
+	fmt.Println()
+	if link.Note != "" {
+		fmt.Printf("            %s\n", link.Note)
 	}
 	if historyPath != "" {
-		fmt.Printf("  Istoric: %s\n", historyPath)
+		fmt.Printf("  Istoric:  %s\n", historyPath)
 	}
 	fmt.Println()
 	fmt.Println("  Deschide pe telefon:")

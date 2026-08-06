@@ -119,6 +119,40 @@ O rulare compară doar cu rulări de aceeași formă — același mod, aceeași
 direcție, aceeași rețea. Un download manual de 4 minute și o rulare automată de
 10 s în ambele sensuri nu măsoară același lucru.
 
+## Setările rețelei laptopului
+
+Ecranul de start arată cum e conectat calculatorul pe care rulează serverul:
+cablu sau Wi-Fi, iar dacă e Wi-Fi — SSID, bandă, canal, lățime de canal,
+standard 802.11, semnal, securitate, BSSID și rata radio negociată. Aceleași
+date se salvează cu fiecare rulare și apar sub „Avansat", pentru că **același
+SSID pe 2.4 GHz și pe 5 GHz sunt rețele diferite** din punct de vedere al
+debitului, iar o rulare fără contextul ăsta nu se poate interpreta mai târziu.
+
+Detecția e best effort și diferă per sistem:
+
+| Sistem | Unealtă | Ce obține |
+|--------|---------|-----------|
+| **Linux** | `iw dev <if> link`, completat cu `nmcli` | SSID, BSSID, frecvență, semnal în dBm, rate, lățime; securitate din nmcli |
+| **macOS** | `system_profiler SPAirPortDataType` | SSID, standard PHY, canal + bandă + lățime, securitate, semnal/zgomot, rată |
+| **Windows** | `netsh wlan show interfaces` | SSID, BSSID, tip radio, bandă, canal, rate, semnal în procente |
+| Cablu, Linux | `/sys/class/net/<if>/speed` și `/duplex` | viteza portului și duplex |
+| Cablu, macOS | `networksetup -getmedia` | la fel |
+
+Ce nu se poate citi lipsește pur și simplu; nimic de aici nu poate opri
+aplicația. Banda și canalul se derivă din frecvență când unealta dă doar
+frecvența — cele trei benzi își numerotează canalele de la ancore diferite, așa
+că nu e o singură formulă.
+
+Două lucruri de reținut:
+
+- **Rata radio nu e o măsurătoare.** E viteza negociată a legăturii, adică
+  plafonul teoretic. Testul măsoară ce livrează efectiv rețeaua, și e normal să
+  fie considerabil mai mică.
+- **Sondarea nu atinge niciodată un test.** Se face la pornire și apoi în fundal
+  la 30 s, iar rezultatul e păstrat în cache; `system_profiler` poate dura
+  secunde, și nici încărcarea paginii nici finalul unui test nu au voie să
+  aștepte după el.
+
 ## Ce măsoară, și cum
 
 | Metrică | Metodă |

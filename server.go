@@ -161,6 +161,7 @@ type Server struct {
 	defaultStreams int
 	history        *HistoryStore
 	network        NetworkIdentity
+	link           *LinkMonitor
 	webFS          fs.FS
 
 	mu        sync.Mutex
@@ -169,7 +170,7 @@ type Server struct {
 	lanURLs   []string
 }
 
-func newServer(port, defaultStreams int, hist *HistoryStore, network NetworkIdentity, webFS fs.FS) *Server {
+func newServer(port, defaultStreams int, hist *HistoryStore, network NetworkIdentity, link *LinkMonitor, webFS fs.FS) *Server {
 	// One random buffer, allocated once. Generating randomness inside the send
 	// loop would measure the CSPRNG rather than the network.
 	buf := make([]byte, maxChunkSize)
@@ -186,6 +187,7 @@ func newServer(port, defaultStreams int, hist *HistoryStore, network NetworkIden
 		defaultStreams: defaultStreams,
 		history:        hist,
 		network:        network,
+		link:           link,
 		webFS:          webFS,
 		observers:      make(map[*wsConn]PeerInfo),
 	}
@@ -251,6 +253,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/config.js", s.handleConfig)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/urls", s.handleURLs)
+	mux.HandleFunc("/api/link", s.handleLink)
 	mux.HandleFunc("/qr.png", s.handleQR)
 	return mux
 }
@@ -267,6 +270,23 @@ func (s *Server) urls() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.lanURLs...)
+}
+
+// handleLink reports how this machine is attached to the network. It serves a
+// cached snapshot: probing shells out to tools that can take seconds, and a
+// page load must not wait on that.
+func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	var info LinkInfo
+	if s.link != nil {
+		info = s.link.Info()
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"link":    info,
+		"summary": info.Describe(),
+		"network": s.network,
+	})
 }
 
 func (s *Server) handleURLs(w http.ResponseWriter, r *http.Request) {
@@ -709,6 +729,7 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 		ClientAddr:    sess.Peer.Addr,
 		Mode:          mode,
 		Direction:     direction,
+		Link:          linkSnapshot(s.link),
 		Frames: FrameStats{
 			DownloadCount: fm.DownloadFrames,
 			UploadCount:   uploadFrames,
@@ -974,6 +995,15 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(strings.Trim(addr, "[]"))
 	return ip != nil && ip.IsLoopback()
+}
+
+// linkSnapshot returns the cached link state, or an empty one when the monitor
+// is not running (tests construct servers without it).
+func linkSnapshot(m *LinkMonitor) LinkInfo {
+	if m == nil {
+		return LinkInfo{Type: LinkUnknown}
+	}
+	return m.Info()
 }
 
 // withSent records how many pings a phase issued alongside how many came back.

@@ -1,13 +1,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net"
-	"os/exec"
-	"runtime"
 	"strings"
-	"time"
 )
 
 // LANAddr is a private address the server is willing to bind to, together with
@@ -158,10 +154,10 @@ type NetworkIdentity struct {
 }
 
 // identifyNetwork prefers the Wi-Fi SSID and falls back to the IPv4 subnet.
-// SSID detection is best effort: it shells out to the platform tool and
-// returns an empty string on any failure, which is not an error condition.
-func identifyNetwork(addrs []LANAddr) NetworkIdentity {
-	id := NetworkIdentity{SSID: detectSSID()}
+// The SSID is passed in rather than probed for here, so this stays pure and the
+// probing lives in one place (link.go).
+func identifyNetwork(addrs []LANAddr, ssid string) NetworkIdentity {
+	id := NetworkIdentity{SSID: strings.TrimSpace(ssid)}
 	for _, a := range addrs {
 		if a.IP.To4() != nil {
 			id.Subnet = subnetOf(a)
@@ -177,56 +173,6 @@ func identifyNetwork(addrs []LANAddr) NetworkIdentity {
 		id.Key = "unknown"
 	}
 	return id
-}
-
-// detectSSID returns the current Wi-Fi network name, or "" if it cannot be
-// determined (wired connection, missing tool, permission denied, no Wi-Fi).
-func detectSSID() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	switch runtime.GOOS {
-	case "linux":
-		if out, err := exec.CommandContext(ctx, "iwgetid", "-r").Output(); err == nil {
-			if s := strings.TrimSpace(string(out)); s != "" {
-				return s
-			}
-		}
-		if out, err := exec.CommandContext(ctx, "nmcli", "-t", "-f", "active,ssid", "dev", "wifi").Output(); err == nil {
-			for _, line := range strings.Split(string(out), "\n") {
-				if strings.HasPrefix(line, "yes:") {
-					return strings.TrimSpace(strings.TrimPrefix(line, "yes:"))
-				}
-			}
-		}
-	case "darwin":
-		for _, iface := range []string{"en0", "en1"} {
-			out, err := exec.CommandContext(ctx, "networksetup", "-getairportnetwork", iface).Output()
-			if err != nil {
-				continue
-			}
-			s := strings.TrimSpace(string(out))
-			if i := strings.Index(s, ": "); i >= 0 && !strings.Contains(s, "not associated") {
-				return strings.TrimSpace(s[i+2:])
-			}
-		}
-	case "windows":
-		out, err := exec.CommandContext(ctx, "netsh", "wlan", "show", "interfaces").Output()
-		if err != nil {
-			return ""
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			t := strings.TrimSpace(line)
-			// Match "SSID : name" but not "BSSID : ..".
-			if !strings.HasPrefix(t, "SSID") {
-				continue
-			}
-			if i := strings.Index(t, ":"); i >= 0 {
-				return strings.TrimSpace(t[i+1:])
-			}
-		}
-	}
-	return ""
 }
 
 // describeUA turns a User-Agent string into something a person can recognise on
