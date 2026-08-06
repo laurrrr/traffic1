@@ -30,9 +30,10 @@ func newTestRig(t *testing.T) *testRig {
 		t.Fatalf("embedded assets: %v", err)
 	}
 	hist := NewHistoryStore(filepath.Join(t.TempDir(), "history.json"))
+	link := NewLinkMonitor("test0")
 	srv := newServer(8080, 4, hist, NetworkIdentity{
 		SSID: "TestNet", Subnet: "192.168.1.0/24", Key: "ssid:TestNet",
-	}, content)
+	}, link, content)
 
 	ts := httptest.NewServer(srv.Mux())
 	t.Cleanup(ts.Close)

@@ -96,6 +96,12 @@ type Hello struct {
 	Index     int    `json:"index"`   // stream index, 0-based
 	Streams   int    `json:"streams"` // how many stream connections the client will open
 	UA        string `json:"ua"`
+	// Mode and Direction are sent on the control connection so the server can
+	// report what the run is at the moment it starts, rather than inferring it
+	// from whichever phase happens to run first. They are labels for the log;
+	// the authoritative pair arrives with FINAL.
+	Mode      string `json:"mode,omitempty"`
+	Direction string `json:"direction,omitempty"`
 }
 
 // HelloAck accepts a connection into a session.

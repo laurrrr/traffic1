@@ -77,7 +77,13 @@
     </div>
 
     <div class="progress"><div id="progress-bar"></div></div>
-    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+      <div class="chart-tools">
+        <span id="chart-hint" class="muted small"></span>
+        <button id="btn-zoom-reset" class="ghost" type="button" hidden>Tot intervalul</button>
+      </div>
+    </div>
 
     <div class="live-actions">
       <button id="btn-stop" class="stop" type="button">Oprește testul</button>
@@ -149,6 +155,9 @@
             <tr><th>Blocaj fir principal browser</th><td id="a-lag">–</td></tr>
             <tr><th>Tampon implicat de latență</th><td id="a-buffer">–</td></tr>
             <tr><th>Mod și direcție</th><td id="a-mode">–</td></tr>
+            <tr><th>Legătura serverului</th><td id="a-link">–</td></tr>
+            <tr><th>Radio (bandă / canal / lățime)</th><td id="a-radio">–</td></tr>
+            <tr><th>Rată radio negociată</th><td id="a-phyrate">–</td></tr>
             <tr><th>Cadre download / upload</th><td id="a-frames">–</td></tr>
             <tr><th>Dimensiunea unui cadru</th><td id="a-framesize">–</td></tr>
             <tr><th>Warmup eliminat</th><td id="a-warmup">–</td></tr>
@@ -175,6 +184,22 @@
         </p>
       </div>
     </details>
+  </section>
+
+  <!-- ── Legătura acestui calculator ─────────────────────────────────────── -->
+  <section id="panel-link">
+    <h2>Conexiunea acestui calculator</h2>
+    <div class="link-card">
+      <div class="link-head">
+        <span id="link-icon" class="link-icon">?</span>
+        <div>
+          <div id="link-title" class="link-title">Se detectează…</div>
+          <div id="link-sub" class="muted small"></div>
+        </div>
+      </div>
+      <dl id="link-details" class="link-details"></dl>
+      <p id="link-note" class="muted small" hidden></p>
+    </div>
   </section>
 
   <!-- ── Setări ──────────────────────────────────────────────────────────── -->

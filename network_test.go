@@ -146,24 +146,35 @@ func TestIdentifyNetworkFallsBackToSubnet(t *testing.T) {
 	_, n, _ := net.ParseCIDR("192.168.7.0/24")
 	addrs := []LANAddr{{IP: net.ParseIP("192.168.7.22").To4(), Net: n}}
 
-	id := identifyNetwork(addrs)
+	id := identifyNetwork(addrs, "")
 	if id.Subnet != "192.168.7.0/24" {
 		t.Errorf("subnet: got %q", id.Subnet)
 	}
-	// SSID detection is environment dependent; whichever way it goes, the key
-	// must be non-empty and derived from one of the two sources.
-	if id.Key == "" {
-		t.Error("network key must never be empty")
-	}
-	if id.SSID == "" && id.Key != "subnet:192.168.7.0/24" {
+	if id.Key != "subnet:192.168.7.0/24" {
 		t.Errorf("with no SSID the key must come from the subnet, got %q", id.Key)
 	}
 }
 
+func TestIdentifyNetworkPrefersSSID(t *testing.T) {
+	_, n, _ := net.ParseCIDR("192.168.7.0/24")
+	addrs := []LANAddr{{IP: net.ParseIP("192.168.7.22").To4(), Net: n}}
+
+	id := identifyNetwork(addrs, "  Acasa_5G  ")
+	if id.SSID != "Acasa_5G" {
+		t.Errorf("SSID should be trimmed, got %q", id.SSID)
+	}
+	if id.Key != "ssid:Acasa_5G" {
+		t.Errorf("key should come from the SSID, got %q", id.Key)
+	}
+	if id.Subnet != "192.168.7.0/24" {
+		t.Errorf("subnet should still be recorded, got %q", id.Subnet)
+	}
+}
+
 func TestIdentifyNetworkWithNoAddresses(t *testing.T) {
-	id := identifyNetwork(nil)
-	if id.Key == "" {
-		t.Error("network key must never be empty")
+	id := identifyNetwork(nil, "")
+	if id.Key != "unknown" {
+		t.Errorf("network key must never be empty, got %q", id.Key)
 	}
 }
 

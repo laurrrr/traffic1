@@ -43,6 +43,12 @@ type Run struct {
 	Mode      string `json:"mode"`
 	Direction string `json:"direction"`
 
+	// Link is how the machine running the server was attached at the time:
+	// cable or Wi-Fi, and on which band and channel. Two runs on the same SSID
+	// can differ wildly if one was on 2.4 GHz and the other on 5 GHz, so the
+	// radio settings belong with the result.
+	Link LinkInfo `json:"link"`
+
 	// Frames counts the WebSocket messages the test moved, and the payload size
 	// of one. These are application frames, not IP packets: TCP re-segments
 	// them to the path MTU, so the number of packets on the wire is different
