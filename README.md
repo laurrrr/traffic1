@@ -79,7 +79,9 @@ va avea mai puține câmpuri.
 
 ### Dependențe Go
 
-Trei directe, toate cu licențe permisive:
+Trei directe, toate cu licențe permisive (`gorilla/websocket` e BSD-2-Clause,
+celelalte două MIT) — deci compatibile cu GPL v3, sub care e distribuit acest
+proiect:
 
 | Modul | Rol |
 |---|---|
@@ -853,7 +855,7 @@ HELLO până la rezultatul salvat.
 |---|---|
 | `go.mod` / `go.sum` | trei dependențe directe, restul tranzitive prin Wails |
 | `.github/workflows/ci.yml` | gofmt + vet + teste cu `-race`, build server-only pe Linux/macOS/Windows, build desktop nativ pe fiecare |
-| `LICENSE` | MIT |
+| `LICENSE` | GNU GPL v3, text integral |
 | `.gitignore` | binarele produse de build |
 
 ## Limitările reale ale metodei
@@ -962,4 +964,19 @@ go test -short ./...   # sare peste testele care mută octeți
 
 ## Licență
 
-MIT — vezi [LICENSE](LICENSE).
+GNU General Public License, versiunea 3 — textul integral în
+[LICENSE](LICENSE). Identificator SPDX: `GPL-3.0-only`.
+
+Copyright (C) 2026 laurrrr
+
+Acest program este software liber: îl poți redistribui și/sau modifica în
+termenii GNU General Public License versiunea 3, așa cum e publicată de Free
+Software Foundation.
+
+Programul este distribuit în speranța că va fi util, dar **FĂRĂ NICIO
+GARANȚIE**; nici măcar garanția implicită de VANDABILITATE sau de POTRIVIRE
+PENTRU UN ANUMIT SCOP. Vezi GNU General Public License pentru detalii.
+
+Pe scurt, ce înseamnă practic: oricine primește o copie — inclusiv sub formă de
+binar compilat — are dreptul să primească și codul sursă, iar orice lucrare
+derivată trebuie distribuită sub aceeași licență.
