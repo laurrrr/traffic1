@@ -580,6 +580,280 @@ Două lucruri de reținut:
   secunde, și nici încărcarea paginii nici finalul unui test nu au voie să
   aștepte după el.
 
+## Structura proiectului, fișier cu fișier
+
+```
+traffic1/
+├── protocol.go            definițiile de pe fir: tipuri de mesaje, structuri
+├── stats.go               toată matematica: percentile, agregare, bufferbloat
+├── network.go             adrese private, identitatea rețelei
+├── link.go                cum e conectat laptopul (Wi-Fi/cablu, bandă, canal)
+├── history.go             persistența rulărilor
+├── server.go              serverul HTTP + WebSocket, sesiuni, fazele de test
+├── streamlog.go           tabelele per stream din terminal
+├── main.go                pornire: flag-uri, banner, listener-e
+├── shell_headless.go      build implicit: fără fereastră
+├── shell_desktop.go       build `desktop`: fereastra Wails
+├── shell_desktop_guard.go oprește build-ul dacă lipsește tag-ul `production`
+├── web/
+│   ├── index.html         structura paginii
+│   ├── style.css          două layout-uri, temă clară/întunecată
+│   └── app.js             clientul: protocol, orchestrare, grafic, export
+├── *_test.go              104 teste
+└── .github/workflows/ci.yml
+```
+
+**Regula care ține totul laolaltă:** frontend-ul nu calculează nicio statistică.
+Trimite eșantioane brute și timpi de dus-întors bruți; serverul face tăierea,
+percentilele și notarea. Așa nu există o implementare în Go și una în JavaScript
+care să divergă.
+
+---
+
+### `protocol.go` — 264 rânduri
+
+Definește „limba" dintre client și server. Nu conține logică, doar contractul.
+
+- **18 constante de tip de mesaj** (`MsgPing` … `MsgStop`), fiecare cu un
+  comentariu care spune direcția, rolul de conexiune și forma încărcăturii.
+- **Constantele de rol** (`control`, `stream`, `observer`), de mod (`auto`,
+  `manual`) și de direcție (`both`, `download`, `upload`).
+- **Structurile JSON** ale fiecărui mesaj: `Hello`, `HelloAck`, `Busy`,
+  `DownStartCfg`, `DownDoneMsg`, `UpStartCfg`, `UpResultMsg`, `Progress`,
+  `FinalMsg`, `StoredMsg`, `ObserveEvent`, `PeerInfo`, `StallEvent`.
+
+Comentariul de deschidere documentează și **seam-ul pentru WebRTC DataChannel** —
+interfața `Transport` care ar trebui implementată, unde se schimbă tipul concret,
+și de ce doar rolul „stream" ar avea nevoie de transport nesigur. Nu e
+implementat; e scris ca să nu trebuiască redescoperit.
+
+`FinalMsg` merită o privire: e **deliberat brut**. Clientul trimite ferestre de
+eșantionare netăiate și RTT-uri netăiate, nu cifre gata calculate. Cifrele de
+upload nu apar deloc — serverul le-a măsurat el însuși.
+
+### `stats.go` — 484 rânduri
+
+Toată matematica, în funcții pure. Singurul loc unde se calculează ceva.
+
+| Funcție | Ce face |
+|---|---|
+| `Mbps` | octeți peste durată → megabiți pe secundă |
+| `Percentile` | percentilă interpolată liniar; nu mutează intrarea |
+| `AggregateSamples` | **însumează** ferestrele aliniate ale streamurilor paralele |
+| `TrimWarmup` | aruncă primele 1000 ms (TCP slow-start) |
+| `TrimTail` | aruncă ultima fereastră (streamurile nu se opresc simultan) |
+| `Summarize` | serie de eșantioane → min/p50/p95/max/medie |
+| `Jitter` | diferența medie absolută între RTT-uri consecutive (stil RFC 3550) |
+| `SummarizeLatency` | RTT-uri → statistici + `Sent` pentru rata de răspuns |
+| `GradeBufferbloat` | milisecunde în plus → notă A–F |
+| `ComputeBufferbloat` | nota, plus **cele trei verificări de încredere** |
+| `BuildVerdict` | cifrele → o frază în română, conștientă de direcție |
+| `clampDuration` | mărginește durata cerută de client |
+
+Tipurile: `Sample`, `DirStats`, `LatencyStats`, `LatencyReport`, `Bufferbloat`,
+`FrameStats`.
+
+Două lucruri de reținut din acest fișier. **`AggregateSamples` însumează, nu
+mediază** — patru streamuri se adună în aceeași fereastră de timp; media ar
+sub-raporta legătura de patru ori. Și **`ComputeBufferbloat` poate refuza să dea
+o notă**, dacă firul principal al browserului a fost blocat, dacă ping-urile nu
+s-au întors, sau dacă întârzierea măsurată ar cere mai mult tampon decât poate
+exista fizic în rețea.
+
+### `network.go` — 217 rânduri
+
+Ce adrese are mașina și cum se numește rețeaua.
+
+- `getLANAddresses` — enumeră interfețele și păstrează **doar** adresele private.
+  IPv6 link-local e sărit intenționat: are nevoie de zone ID (`fe80::1%en0`), pe
+  care browserele nu îl acceptă în URL.
+- `isPrivateV4` / `isPrivateV6` / `isPrivateHost` — politica de adrese. Numele de
+  host sunt respinse: un nume poate rezolva oriunde.
+- `subnetOf`, `formatURL`, `formatListenAddr`, `hostOnly` — formatare, cu grijă
+  la parantezele IPv6.
+- `identifyNetwork` — cheia sub care se grupează rulările: SSID dacă se poate
+  citi, altfel subnet. **Funcție pură** — SSID-ul vine ca argument.
+- `describeUA` — User-Agent → „Android / Chrome". Deliberat grosier: e o etichetă
+  în interfață, nu o intrare într-o decizie.
+
+### `link.go` — 635 rânduri
+
+Cum e conectat laptopul. Cel mai mare fișier după `server.go`, aproape tot
+parsare.
+
+**Partea pură** (testabilă fără sistemul de operare):
+`bandFromFreq`, `channelFromFreq` — cele trei benzi își numerotează canalele de
+la ancore diferite, deci nu e o singură formulă.
+
+**Parserele**, câte unul per unealtă, fiecare o funcție de la text la `LinkInfo`:
+
+| Funcție | Unealtă | Capcana pe care o rezolvă |
+|---|---|---|
+| `parseIWLink` | `iw dev X link` | lățimea de canal e ascunsă în linia de bitrate |
+| `parseNmcliWifi` | `nmcli dev wifi` | nmcli escapează două puncte în BSSID; un `split(":")` naiv sparge rândul |
+| `parseSystemProfilerAirPort` | `system_profiler` | listează rețelele vecine *după* cea conectată — parsarea trebuie să se oprească |
+| `parseNetshWlan` | `netsh wlan show interfaces` | etichetele sunt **localizate** |
+| `parseNetworksetupMedia` | `networksetup -getmedia` | cablu: viteză și duplex |
+
+**Partea care atinge sistemul**: `detectLinkLinux` / `Darwin` / `Windows`,
+`isWirelessLinux` (întreabă sysfs, nu ghicește după numele interfeței),
+`runTool` (fiecare comandă are timeout de 6 s), și `safeIface` — o expresie
+regulată care validează numele interfeței înainte să ajungă pe o linie de
+comandă.
+
+**`LinkMonitor`** ține un snapshot în cache, reîmprospătat în fundal la 30 s.
+Există pentru că `system_profiler` poate dura secunde, iar nici încărcarea
+paginii nici finalul unui test nu au voie să aștepte după el.
+
+### `history.go` — 199 rânduri
+
+Persistența. Structura `Run` e forma completă a unui rezultat salvat: identitate,
+rețea, mod, direcție, legătură, cadre, ambele direcții, latență, bufferbloat,
+verdict, caveats.
+
+`HistoryStore` scrie **atomic**, printr-un fișier temporar plus `rename`, ca o
+cădere la mijlocul scrierii să nu lase un istoric trunchiat. Citirea filtrează
+rulările cu altă versiune de schemă în loc să ghicească, și un fișier corupt e
+raportat și înlocuit — nu oprește aplicația.
+
+`Append` alege și rularea precedentă **comparabilă**: aceeași rețea, același mod,
+aceeași direcție, neîntreruptă. Un download manual de 4 minute și o rulare
+automată de 10 s în ambele sensuri nu măsoară același lucru.
+
+### `server.go` — 1146 rânduri
+
+Inima. Merită citit pe bucăți.
+
+**`wsConn`** — un wrapper peste conexiunea gorilla care serializează scrierile.
+Necesar pentru că rezultatele se scriu dintr-o altă goroutină decât cea care
+citește, iar gorilla permite exact un scriitor.
+
+**`Session`** — o rulare logică: conexiunea de control plus streamurile ei.
+Ține flag-ul de stop pentru modul manual, eșantioanele de upload per stream,
+și rezultatele per stream pentru tabelele din terminal.
+
+**`Server`** — lacătul de test unic, mulțimea de observatori, istoricul,
+monitorul de legătură.
+
+**`checkOrigin`** — refuză orice nu e adresă privată sau loopback. Verifică
+`Host`-ul (politica de legare) **și** `Origin`-ul (asta e ce oprește efectiv o
+pagină de pe internet să comande serverul prin browserul tău).
+
+**Handlerele HTTP**: `handleWS`, `handleConfig`, `handleHistory`, `handleURLs`,
+`handleLink`, `handleQR`.
+
+**Cele trei roluri**: `serveControl` (ia lacătul, duce PING/PONG, primește
+FINAL), `serveStream` (execută fazele), `serveObserver` (primește difuzările,
+niciodată blocat).
+
+**Fazele**: `sendDownload` scrie într-o buclă strânsă din bufferul preîncărcat,
+cu deadline pe fiecare scriere și detecție de blocaj; `recvUpload` citește și
+grupează octeții în ferestre aliniate la un moment de start comun sesiunii.
+
+**`handleFinal`** — locul unde se compune rezultatul: taie warmup-ul, cheamă
+statisticile, compară contorul clientului cu al serverului, calculează
+bufferbloat-ul și verdictul, salvează, difuzează.
+
+### `streamlog.go` — 215 rânduri
+
+Tabelele din terminal, ca funcții pure peste structuri simple.
+`formatRunHeader` afișează tuplurile TCP la începutul rulării;
+`formatStreamTable` afișează repartiția la final; `balanceNote` semnalează un
+stream înfometat, cu praguri puse mult în afara variației normale TCP ca o
+rulare obișnuită să rămână tăcută.
+
+### `main.go` — 156 rânduri
+
+Pornirea, în ordine: parsează flag-urile, enumeră adresele private (și **refuză
+să pornească** dacă nu găsește niciuna), sondează legătura o dată, identifică
+rețeaua, construiește serverul, afișează bannerul cu QR, deschide **câte un
+listener per adresă** plus loopback, apoi predă controlul shell-ului.
+
+Legarea per adresă în loc de `0.0.0.0` e intenționată: unealta nu trebuie să fie
+accesibilă de pe o interfață publică nici din greșeală.
+
+### Cele trei shell-uri
+
+| Fișier | Tag | Rol |
+|---|---|---|
+| `shell_headless.go` (24) | `!desktop` | așteaptă Ctrl-C. Build-ul implicit. |
+| `shell_desktop.go` (88) | `desktop` | deschide fereastra Wails servind **același** `http.Handler`. Bindings doar pentru dialogul de salvare și deschiderea unui link. |
+| `shell_desktop_guard.go` (18) | `desktop && !production` | **oprește compilarea** cu numele fixului în mesaj |
+
+Fișierul-gardă există dintr-un motiv concret: fără tag-ul `production`, Wails
+compilează un stub care eșuează *la rulare*, după ce serverul a pornit deja și a
+afișat codul QR. Arăta ca un bug de server. Acum e o eroare de compilare care
+spune ce să scrii.
+
+---
+
+### Frontend
+
+#### `web/index.html` — 250 rânduri
+
+Structura paginii. Panourile pentru fiecare stare (așteptare / rulare /
+rezultat), cardurile de rezultat, tabelul „Avansat", panoul cu legătura
+laptopului. Vizibilitatea nu e controlată din JavaScript, ci prin atributele
+`data-state` și `data-layout` de pe elementul rădăcină.
+
+#### `web/style.css` — 486 rânduri
+
+Un singur stylesheet, două layout-uri. Variabile CSS pentru temă, cu
+`prefers-color-scheme` pentru modul întunecat. Layout-ul „host" și „client"
+sunt selectate prin `data-layout`, iar panourile prin `data-state` — deci
+schimbarea stării e o singură atribuire, nu o listă de `style.display`.
+
+#### `web/app.js` — 2159 rânduri
+
+Clientul. Fără framework, fără build step, fără dependențe.
+
+- **Transport** — `openConn` face handshake-ul HELLO și respinge cu `BusyError`
+  când lacătul e luat; `sendRaw` / `sendJSON` construiesc cadre binare.
+- **`Chart`** — canvas cu două axe, benzi de fază, zoom prin tragere, rotiță,
+  cruce cu citire exactă. Scările verticale și decimarea se recalculează din
+  fereastra vizibilă, deci mărirea chiar rezolvă detaliu.
+- **Orchestrarea rulării** — `runIdleLatency`, `runDownload`, `runUpload`,
+  `sendFinal`, plus `stopTest` pentru modul manual.
+- **Contrapresiune** — `pump` umple socketul dar se oprește la 4 MiB în coadă;
+  `bufferedAmount` e singurul semnal de contrapresiune pe care îl dă un
+  WebSocket, iar ignorarea lui ar raporta un debit pe care rețeaua nu l-a livrat.
+- **Măsurarea propriei sănătăți** — un timer separat măsoară cât de târziu se
+  declanșează, ca serverul să poată decide dacă latența descrie rețeaua sau
+  browserul.
+- **Randarea** — rezultate, comparație, istoric, panoul de legătură, export JSON
+  și PNG.
+- **Modul observator** — aceeași pagină oglindește rularea altui dispozitiv.
+
+---
+
+### Teste — 104 în total
+
+| Fișier | Teste | Ce acoperă |
+|---|---|---|
+| `stats_test.go` | 34 | percentile, agregarea pe streamuri, tăierea warmup-ului, bufferbloat și cele trei verificări de încredere, verdictul |
+| `link_test.go` | 20 | parserele pentru toate cele trei sisteme, cu ieșire capturată reală |
+| `server_test.go` | 17 | politica de Origin, handshake, refuzul concurenței, **ciclu complet** împotriva unui server real, modul manual |
+| `network_test.go` | 13 | detecția adreselor private, subnet, User-Agent |
+| `streamlog_test.go` | 11 | formatarea tabelelor, detecția streamului înfometat |
+| `history_test.go` | 9 | persistență, comparație, fișier corupt, plafon |
+
+Parserele din `link_test.go` sunt singurul mod în care căile macOS și Windows pot
+fi verificate din altă parte: fiecare parser e o funcție pură peste text, testată
+cu ieșire realistă capturată de pe sistemele respective.
+
+`server_test.go` pornește un server adevărat cu `httptest`, conectează clienți
+WebSocket și mută octeți reali prin protocol — inclusiv un ciclu complet de la
+HELLO până la rezultatul salvat.
+
+### Meta
+
+| Fișier | Rol |
+|---|---|
+| `go.mod` / `go.sum` | trei dependențe directe, restul tranzitive prin Wails |
+| `.github/workflows/ci.yml` | gofmt + vet + teste cu `-race`, build server-only pe Linux/macOS/Windows, build desktop nativ pe fiecare |
+| `LICENSE` | MIT |
+| `.gitignore` | binarele produse de build |
+
 ## Limitările reale ale metodei
 
 Astea nu sunt detalii de subsol, sunt motivele pentru care unele cifre nu
