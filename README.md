@@ -5,60 +5,56 @@ mai important — cu cât crește latența când legătura e încărcată. Pe la
 rulează o aplicație cu fereastră proprie. Pe telefon nu instalezi nimic:
 deschizi o adresă în browser, HTTP simplu, fără certificate.
 
+Traficul e real: serverul trimite octeți dintr-un buffer aleator preîncărcat și
+numără ce ajunge la celălalt capăt. Nu sunt cifre simulate.
+
 Metrica-vedetă nu e viteza, ci **bufferbloat**: diferența dintre latența în
 repaus și latența sub sarcină. Un Wi-Fi care dă 900 Mbps dar urcă de la 3 ms la
 400 ms sub încărcare e o rețea pe care apelurile video se blochează.
 
-## Quickstart
+---
 
-Necesită **Go 1.25+**. Cu setările implicite (`GOTOOLCHAIN=auto`) Go descarcă
-singur toolchain-ul potrivit, deci merge și de pe o instalare mai veche.
+## Cuprins
 
-```bash
-go build -o lantest .        # binar server-only (fără CGO, fără GUI)
-./lantest
-```
+1. [Cerințe](#cerințe)
+2. [Instalare](#instalare)
+3. [Primul test, pas cu pas](#primul-test-pas-cu-pas)
+4. [Opțiuni de linie de comandă](#opțiuni-de-linie-de-comandă)
+5. [Ce vezi în terminal](#ce-vezi-în-terminal)
+6. [Cum se folosește interfața](#cum-se-folosește-interfața)
+7. [Arhitectură](#arhitectură)
+8. [Metodologia măsurătorii](#metodologia-măsurătorii)
+9. [Setările rețelei laptopului](#setările-rețelei-laptopului)
+10. [Structura proiectului, fișier cu fișier](#structura-proiectului-fișier-cu-fișier)
+11. [Limitările reale ale metodei](#limitările-reale-ale-metodei)
+12. [Securitate](#securitate)
+13. [Probleme frecvente](#probleme-frecvente)
+14. [Dezvoltare](#dezvoltare)
 
-Serverul afișează adresele LAN și un cod QR. Scanezi cu telefonul, apeși
-**Pornește testul**. Ecranul laptopului arată același grafic live.
+---
 
-Pentru fereastra desktop:
+## Cerințe
 
-```bash
-go build -tags "desktop,production" -o lantest-desktop .                # macOS, Windows
-go build -tags "desktop,production,webkit2_41" -o lantest-desktop .     # Linux
-./lantest-desktop
-```
+### Obligatoriu
 
-Ambele tag-uri sunt obligatorii: `desktop` selectează shell-ul din acest repo,
-`production` e cerut de Wails. Fără `production`, Wails compilează un stub care
-eșuează la rulare — build-ul e configurat să refuze din start, cu mesajul
-corect.
+| | Versiune | De ce |
+|---|---|---|
+| **Go** | 1.25 sau mai nou | Cerut de Wails v2.13 și de `golang.org/x/net`. Cu `GOTOOLCHAIN=auto` (implicit), Go descarcă singur toolchain-ul potrivit, deci merge și de pe o instalare mai veche. |
+| **O rețea privată** | RFC 1918 / link-local | Unealta refuză să pornească dacă nu găsește nicio adresă privată. Vezi [Securitate](#securitate). |
 
-### Opțiuni
+Binarul **server-only** (build implicit) nu are nevoie de nimic altceva: e Go
+pur, fără CGO, fără biblioteci de sistem.
 
-```
-./lantest -port 9090              # alt port (implicit 8080)
-./lantest -streams 8              # streamuri paralele implicite: 1, 4 sau 8
-./lantest -history /cale/f.json   # alt fișier de istoric
-```
+### Doar pentru fereastra desktop
 
-## Build pe fiecare platformă
+Shell-ul desktop folosește **Wails v2**, care randează prin webview-ul
+sistemului de operare. Asta înseamnă CGO și biblioteci native:
 
-Shell-ul desktop folosește Wails v2, care randează prin webview-ul sistemului.
-Asta înseamnă CGO și, implicit, **build nativ pe fiecare platformă** —
-cross-compile de pe Linux pentru macOS/Windows nu funcționează.
-
-| Platformă | Dependențe | Comandă |
-|-----------|-----------|---------|
-| **Linux** | `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` | `go build -tags "desktop,production,webkit2_41" -o lantest-desktop .` |
-| **macOS** | Xcode Command Line Tools (WKWebView vine cu sistemul) | `go build -tags "desktop,production" -o lantest-desktop .` |
-| **Windows** | WebView2 Runtime (preinstalat pe Windows 11) | `go build -tags "desktop,production" -ldflags "-H windowsgui" -o lantest-desktop.exe .` |
-
-Pe Linux, `webkit2_41` e necesar pentru WebKitGTK 4.1 (Ubuntu 24.04 și mai nou).
-Pe distribuții cu WebKitGTK 4.0 lasă tag-ul deoparte și instalează
-`libwebkit2gtk-4.0-dev`. Pe Windows, `-H windowsgui` scapă de fereastra de
-consolă din spatele aplicației. Pentru binare mai mici, adaugă `-ldflags "-w -s"`.
+| Platformă | Ce trebuie instalat |
+|---|---|
+| **Linux** | `libgtk-3-dev` și `libwebkit2gtk-4.1-dev` (sau `-4.0-dev` pe distribuții mai vechi) |
+| **macOS** | Xcode Command Line Tools — `xcode-select --install`. WKWebView vine cu sistemul. |
+| **Windows** | WebView2 Runtime, preinstalat pe Windows 11 și pe Windows 10 actualizat |
 
 Pe Ubuntu/Debian:
 
@@ -66,8 +62,185 @@ Pe Ubuntu/Debian:
 sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 ```
 
-Build-ul **implicit**, fără tag-uri, nu are nevoie de nimic din toate astea: e
-Go pur, fără CGO, potrivit pentru servere și CI. Diferența e doar fereastra.
+### Opțional, la rulare
+
+Detecția setărilor Wi-Fi (SSID, bandă, canal) apelează unelte de sistem. Dacă
+lipsesc, aplicația merge normal — doar că panoul „Conexiunea acestui calculator"
+va avea mai puține câmpuri.
+
+| Platformă | Unealtă | Pachet |
+|---|---|---|
+| Linux | `iw` | `iw` |
+| Linux | `nmcli` (completează securitatea și semnalul în %) | `network-manager` |
+| macOS | `system_profiler`, `networksetup` | incluse în sistem |
+| Windows | `netsh` | inclus în sistem |
+
+### Dependențe Go
+
+Trei directe, toate cu licențe permisive:
+
+| Modul | Rol |
+|---|---|
+| `github.com/gorilla/websocket` | Conexiunile WebSocket ale protocolului de test |
+| `github.com/skip2/go-qrcode` | Codul QR — în terminal și ca PNG la `/qr.png` |
+| `github.com/wailsapp/wails/v2` | Fereastra desktop. Compilată **doar** cu tag-ul `desktop`; build-ul implicit nu o atinge. |
+
+Frontend-ul are **zero** dependențe: fără npm, fără build step, fără CDN. Tot
+HTML/CSS/JS-ul e scris de mână și embed-uit în binar cu `go:embed`.
+
+---
+
+## Instalare
+
+```bash
+git clone https://github.com/laurrrr/traffic1.git
+cd traffic1
+```
+
+### Varianta 1 — server-only (recomandată pentru prima încercare)
+
+Fără CGO, fără GUI, merge oriunde:
+
+```bash
+go build -o lantest .
+./lantest
+```
+
+### Varianta 2 — cu fereastră desktop
+
+**Ambele tag-uri sunt obligatorii:** `desktop` selectează shell-ul din acest
+repo, `production` e cerut de Wails. Fără `production`, Wails compilează un stub
+care eșuează la rulare — de aceea build-ul e configurat să refuze din start, cu
+mesajul corect în eroarea de compilare.
+
+| Platformă | Comandă |
+|---|---|
+| **Linux** (WebKitGTK 4.1) | `go build -tags "desktop,production,webkit2_41" -o lantest-desktop .` |
+| **Linux** (WebKitGTK 4.0) | `go build -tags "desktop,production" -o lantest-desktop .` |
+| **macOS** | `go build -tags "desktop,production" -o lantest-desktop .` |
+| **Windows** | `go build -tags "desktop,production" -ldflags "-H windowsgui" -o lantest-desktop.exe .` |
+
+Pe Windows, `-H windowsgui` scapă de fereastra de consolă din spatele
+aplicației. Pentru binare mai mici, adaugă `-ldflags "-w -s"`.
+
+> **Cross-compile nu funcționează pentru varianta desktop.** Wails are nevoie de
+> CGO și de webview-ul nativ, deci fiecare platformă se compilează pe ea însăși.
+> Varianta server-only se cross-compilează fără probleme.
+
+---
+
+## Primul test, pas cu pas
+
+1. **Conectează laptopul la rețea.** Ideal pe cablu, dacă vrei să măsori
+   Wi-Fi-ul telefonului izolat — altfel rezultatul include ambele legături
+   wireless.
+
+2. **Pornește serverul.**
+
+   ```bash
+   ./lantest
+   ```
+
+   Dacă vezi `no private LAN addresses found`, ești pe VPN sau pe o interfață
+   publică. Deconectează VPN-ul.
+
+3. **Citește bannerul.** Îți spune pe ce rețea ești, cum e conectat laptopul,
+   unde se salvează istoricul și ce adrese poate folosi telefonul.
+
+4. **Deschide pe telefon.** Scanează codul QR din terminal, sau tastează adresa
+   afișată (`http://192.168.x.x:8080`). Telefonul trebuie să fie pe **aceeași
+   rețea**. Dacă pagina nu se încarcă, vezi
+   [Probleme frecvente](#probleme-frecvente) — cel mai des e izolarea clienților
+   pe Wi-Fi.
+
+5. **Alege setările** pe ecranul telefonului: direcție, durată, streamuri
+   paralele. Implicit: ambele direcții, 10 secunde, 4 streamuri.
+
+6. **Apasă „Pornește testul".** Ține ecranul aprins — un telefon care se blochează
+   oprește timerele browserului, iar rularea e marcată ca nesigură.
+
+7. **Urmărește pe laptop.** Ecranul desktop oglindește același grafic live, iar
+   terminalul afișează fiecare stream cu tuplul lui TCP.
+
+8. **Citește rezultatul.** Verdictul într-o frază, apoi cifrele. Detaliile
+   tehnice sunt sub „Avansat".
+
+Prima rulare durează ~25 de secunde (1 s latență în repaus + 10 s download +
+10 s upload, plus conectare).
+
+---
+
+## Opțiuni de linie de comandă
+
+```
+./lantest -port 9090              # alt port (implicit 8080)
+./lantest -streams 8              # streamuri paralele implicite: 1, 4 sau 8
+./lantest -history /cale/f.json   # alt fișier de istoric
+```
+
+Numărul de streamuri dat aici e doar **valoarea implicită** a interfeței;
+selectorul din pagină îl suprascrie pentru fiecare rulare.
+
+---
+
+## Ce vezi în terminal
+
+### La pornire
+
+```
+  lantest — test de throughput și latență în LAN
+  ──────────────────────────────────────────────
+  Rețea:    Acasa_5G (192.168.1.0/24)
+  Legătură: Wi-Fi Acasa_5G (5 GHz, canal 44/80 MHz, 802.11ax, -47 dBm) · rată radio 867 Mbps  [wlp3s0]
+  Istoric:  /home/tu/.config/lantest/history.json
+
+  Deschide pe telefon:
+
+    http://192.168.1.10:8080
+
+  [cod QR]
+```
+
+### La începutul unei rulări
+
+```
+── 12:46:06 Test pornit ───────────────────────────────────
+   Client:    Android / Chrome (192.168.1.23)
+   Sesiune:   06a286be04ed21fa
+   Mod:       automat, 10 s pe direcție · download și upload · 4 streamuri · cadre de 64 KiB
+   Streamuri:
+     #0  192.168.1.23:35244 → 192.168.1.10:8080
+     #1  192.168.1.23:35258 → 192.168.1.10:8080
+     #2  192.168.1.23:35274 → 192.168.1.10:8080
+     #3  192.168.1.23:35278 → 192.168.1.10:8080
+```
+
+Tuplurile TCP sunt acolo ca să poți confirma din `ss -tn` sau Wireshark că sunt
+chiar N conexiuni separate, și pe ce porturi sursă.
+
+### La finalul fiecărei direcții
+
+```
+── 12:46:16 Download încheiat (contorul serverului) ───────
+     #    Octeți       Cadre      Mbps        Cotă   Blocaje
+     0    154 MiB      2 456      128        25.2%         0
+     1    152 MiB      2 436      127        25.0%         0
+     2    153 MiB      2 444      127        25.0%         1
+     3    152 MiB      2 426      126        24.9%         0
+     tot  610 MiB      9 762      507                      1
+```
+
+**Coloana „Cotă" e motivul pentru care există tabelul.** Patru streamuri la 25%
+fiecare și unul la 90% cu trei la 3% dau exact același total, dar numai primul e
+o legătură sănătoasă. Când repartiția e vizibil strâmbă, tabelul o spune în text
+și numește streamul.
+
+„Blocaje" numără scrierile care au durat peste 200 ms — semn că celălalt capăt a
+încetat să golească socket-ul.
+
+Cifrele din tabel sunt ale **serverului**. La download cifra raportată în
+rezultat rămâne a clientului; vezi
+[Metodologia măsurătorii](#metodologia-măsurătorii).
 
 ## Arhitectură
 
@@ -214,42 +387,6 @@ raportat: ar fi o cifră inventată.
 
 Cadrele de download sunt numărate de client, cele de upload de server — același
 principiu ca la octeți: numără capătul care știe ce a ajuns.
-
-### Ce se vede în terminal
-
-La începutul fiecărei rulări, serverul afișează cine testează și **fiecare
-stream cu tuplul lui TCP** — poți confirma din `ss` sau Wireshark că sunt chiar
-N conexiuni separate, și pe ce porturi sursă:
-
-```
-── 12:46:06 Test pornit ───────────────────────────────────
-   Client:    Android / Chrome (192.168.1.23)
-   Sesiune:   06a286be04ed21fa
-   Mod:       automat, 10 s pe direcție · download și upload · 4 streamuri · cadre de 64 KiB
-   Streamuri:
-     #0  192.168.1.23:35244 → 192.168.1.10:8080
-     ...
-```
-
-La sfârșitul fiecărei direcții, câte un tabel per stream:
-
-```
-── 12:46:16 Download încheiat (contorul serverului) ───────
-     #    Octeți       Cadre      Mbps        Cotă   Blocaje
-     0    154 MiB      2 456      128        25.2%         0
-     1    152 MiB      2 436      127        25.0%         0
-     2    153 MiB      2 444      127        25.0%         1
-     3    152 MiB      2 426      126        24.9%         0
-     tot  610 MiB      9 762      507                      1
-```
-
-**Coloana „Cotă" e motivul pentru care există tabelul.** Patru streamuri la 25%
-fiecare și unul la 90% cu trei la 3% dau exact același total, dar numai primul e
-o legătură sănătoasă. Când repartiția e vizibil strâmbă, tabelul o și spune în
-text, numind streamul.
-
-Cifrele din tabel sunt ale **serverului** — util ca diagnostic, dar la download
-cifra raportată rămâne a clientului (vezi mai sus de ce).
 
 ### Streamuri paralele
 
