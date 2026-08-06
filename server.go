@@ -109,6 +109,9 @@ func (c *wsConn) writeJSON(t byte, v any) error {
 
 func (c *wsConn) close() { _ = c.ws.Close() }
 
+func (c *wsConn) localAddr() string  { return c.ws.LocalAddr().String() }
+func (c *wsConn) remoteAddr() string { return c.ws.RemoteAddr().String() }
+
 // Session is one logical test run: a control connection plus its data streams.
 // Only one may exist at a time.
 type Session struct {
@@ -117,17 +120,38 @@ type Session struct {
 	control *wsConn
 	started time.Time
 
-	mu        sync.Mutex
-	streams   map[int]*wsConn
+	mu      sync.Mutex
+	streams map[int]*streamConn
+
+	// headerOnce makes sure the "test started" block is printed exactly once,
+	// at the first load phase — the first moment every stream is known to have
+	// connected.
+	headerOnce sync.Once
+	mode       string
+	direction  string
+	chunkBytes int
+
+	dlActive  int
+	dlResults map[int]streamStat
+
 	upStarted bool
 	upStart   time.Time
 	upActive  int
 	upSamples map[int][]Sample
+	upResults map[int]streamStat
 	upTotal   int64
 	upFrames  int64
 	upFinal   bool
 	upStats   DirStats
 	stopped   bool
+}
+
+// streamConn is one data connection plus the details worth reporting about it.
+type streamConn struct {
+	conn  *wsConn
+	from  string // the client end
+	to    string // this server's end
+	since time.Time
 }
 
 // requestStop ends a manual run. The sending loop polls this between frames, so
@@ -405,7 +429,7 @@ func (s *Server) serveControl(c *wsConn, hello Hello, r *http.Request) {
 	}
 	peer.Local = isLoopbackAddr(peer.Addr)
 
-	sess, ok := s.claim(hello.SessionID, peer, c)
+	sess, ok := s.claim(hello.SessionID, peer, c, hello.Mode, hello.Direction)
 	if !ok {
 		busy := Busy{Message: busyMessage}
 		if cur := s.currentPeer(); cur != nil {
@@ -570,6 +594,9 @@ func (s *Server) sendDownload(sess *Session, c *wsConn, idx int, cfg DownStartCf
 		chunk = defaultChunk
 	}
 
+	sess.logHeader(chunk)
+	sess.beginDownload()
+
 	// Built once per phase from the pre-allocated buffer, then reused for every
 	// write in the loop below.
 	frame := make([]byte, 1+chunk)
@@ -581,6 +608,14 @@ func (s *Server) sendDownload(sess *Session, c *wsConn, idx int, cfg DownStartCf
 	safetyCap := start.Add(maxManualDuration)
 	var total, frames int64
 	stalls := []StallEvent{}
+
+	record := func() {
+		sess.endDownload(streamStat{
+			Index: idx, From: c.remoteAddr(), To: c.localAddr(),
+			Bytes: total, Frames: frames,
+			ElapsedMs: time.Since(start).Milliseconds(), Stalls: len(stalls),
+		})
+	}
 
 	for {
 		if cfg.Manual {
@@ -596,6 +631,7 @@ func (s *Server) sendDownload(sess *Session, c *wsConn, idx int, cfg DownStartCf
 		writeStart := time.Now()
 		if err := c.writeRaw(frame, writeTimeout); err != nil {
 			log.Printf("download stream %d write error: %v", idx, err)
+			record()
 			return
 		}
 		total += int64(chunk)
@@ -616,12 +652,15 @@ func (s *Server) sendDownload(sess *Session, c *wsConn, idx int, cfg DownStartCf
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Stalls:     stalls,
 	})
+	record()
 }
 
 // recvUpload consumes one upload stream, bucketing bytes into fixed windows
 // aligned to a start time shared by every stream in the session. Aligned
 // windows are what makes the per-stream series addable afterwards.
 func (s *Server) recvUpload(sess *Session, c *wsConn, idx int, cfg UpStartCfg) {
+	sess.logHeader(defaultChunk)
+
 	start := sess.beginUpload()
 	hardDeadline := time.Now().Add(clampDuration(cfg.DurationMs) + uploadGrace)
 
@@ -680,10 +719,12 @@ func (s *Server) recvUpload(sess *Session, c *wsConn, idx int, cfg UpStartCfg) {
 			// The final partial window is dropped rather than divided by a full
 			// window width, which would report a throughput collapse that never
 			// happened.
+			sess.recordUploadStream(idx, c, total, frames, start)
 			sess.endUpload(idx, samples, total, frames)
 			return
 		}
 	}
+	sess.recordUploadStream(idx, c, total, frames, start)
 	sess.endUpload(idx, samples, total, frames)
 }
 
@@ -805,7 +846,7 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 
 // claim takes the single-test lock. A second caller is refused outright rather
 // than being allowed to produce numbers that would be wrong for both.
-func (s *Server) claim(id string, peer PeerInfo, control *wsConn) (*Session, bool) {
+func (s *Server) claim(id string, peer PeerInfo, control *wsConn, mode, direction string) (*Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active != nil {
@@ -815,13 +856,25 @@ func (s *Server) claim(id string, peer PeerInfo, control *wsConn) (*Session, boo
 		id = newRunID()
 	}
 	peer.SinceMs = time.Now().UnixMilli()
+	if mode != ModeManual {
+		mode = ModeAuto
+	}
+	switch direction {
+	case DirectionDownload, DirectionUpload, DirectionBoth:
+	default:
+		direction = DirectionBoth
+	}
 	sess := &Session{
 		ID:        id,
 		Peer:      peer,
 		control:   control,
+		mode:      mode,
+		direction: direction,
 		started:   time.Now(),
-		streams:   make(map[int]*wsConn),
+		streams:   make(map[int]*streamConn),
 		upSamples: make(map[int][]Sample),
+		dlResults: make(map[int]streamStat),
+		upResults: make(map[int]streamStat),
 	}
 	s.active = sess
 	return sess, true
@@ -894,8 +947,30 @@ func (s *Server) broadcast(ev ObserveEvent) {
 
 func (sess *Session) addStream(idx int, c *wsConn) {
 	sess.mu.Lock()
-	sess.streams[idx] = c
+	sess.streams[idx] = &streamConn{
+		conn: c, from: c.remoteAddr(), to: c.localAddr(), since: time.Now(),
+	}
 	sess.mu.Unlock()
+}
+
+// logHeader prints the run header once, when the first load phase begins. The
+// client opens every stream and waits for each acknowledgement before starting
+// a phase, so by now the list is complete. Mode and direction come from the
+// control HELLO, which describes the whole run rather than this one phase.
+func (sess *Session) logHeader(chunkBytes int) {
+	sess.headerOnce.Do(func() {
+		sess.mu.Lock()
+		sess.chunkBytes = chunkBytes
+		rows := make([]streamStat, 0, len(sess.streams))
+		for idx, sc := range sess.streams {
+			rows = append(rows, streamStat{Index: idx, From: sc.from, To: sc.to})
+		}
+		peer, id := sess.Peer, sess.ID
+		mode, direction := sess.mode, sess.direction
+		sess.mu.Unlock()
+
+		fmt.Print(formatRunHeader(peer, id, mode, direction, chunkBytes, rows))
+	})
 }
 
 func (sess *Session) removeStream(idx int) {
@@ -907,13 +982,39 @@ func (sess *Session) removeStream(idx int) {
 func (sess *Session) closeStreams() {
 	sess.mu.Lock()
 	conns := make([]*wsConn, 0, len(sess.streams))
-	for _, c := range sess.streams {
-		conns = append(conns, c)
+	for _, sc := range sess.streams {
+		conns = append(conns, sc.conn)
 	}
-	sess.streams = make(map[int]*wsConn)
+	sess.streams = make(map[int]*streamConn)
 	sess.mu.Unlock()
 	for _, c := range conns {
 		c.close()
+	}
+}
+
+// beginDownload and endDownload mirror the upload pair: the last stream to
+// finish prints the breakdown for the phase.
+func (sess *Session) beginDownload() {
+	sess.mu.Lock()
+	sess.dlActive++
+	sess.mu.Unlock()
+}
+
+func (sess *Session) endDownload(stat streamStat) {
+	sess.mu.Lock()
+	sess.dlResults[stat.Index] = stat
+	if sess.dlActive > 0 {
+		sess.dlActive--
+	}
+	last := sess.dlActive == 0
+	rows := make([]streamStat, 0, len(sess.dlResults))
+	for _, r := range sess.dlResults {
+		rows = append(rows, r)
+	}
+	sess.mu.Unlock()
+
+	if last {
+		fmt.Print(formatStreamTable("Download încheiat (contorul serverului)", rows, true))
 	}
 }
 
@@ -928,6 +1029,18 @@ func (sess *Session) beginUpload() time.Time {
 	}
 	sess.upActive++
 	return sess.upStart
+}
+
+// recordUploadStream keeps what one upload stream delivered, for the per-stream
+// breakdown printed when the phase ends.
+func (sess *Session) recordUploadStream(idx int, c *wsConn, total, frames int64, start time.Time) {
+	sess.mu.Lock()
+	sess.upResults[idx] = streamStat{
+		Index: idx, From: c.remoteAddr(), To: c.localAddr(),
+		Bytes: total, Frames: frames,
+		ElapsedMs: time.Since(start).Milliseconds(),
+	}
+	sess.mu.Unlock()
 }
 
 // endUpload records a stream's samples. The last stream to finish aggregates
@@ -956,6 +1069,10 @@ func (sess *Session) endUpload(idx int, samples []Sample, total, frames int64) {
 	upFrames := sess.upFrames
 	start := sess.upStart
 	control := sess.control
+	rows := make([]streamStat, 0, len(sess.upResults))
+	for _, r := range sess.upResults {
+		rows = append(rows, r)
+	}
 	sess.mu.Unlock()
 
 	aggregate := TrimTail(AggregateSamples(perStream))
@@ -983,8 +1100,9 @@ func (sess *Session) endUpload(idx int, samples []Sample, total, frames int64) {
 	if control != nil {
 		_ = control.writeJSON(MsgResult, res)
 	}
-	log.Printf("upload done: %d MB over %d streams, %d windows measured",
-		upTotal/1024/1024, streams, len(measured))
+	fmt.Print(formatStreamTable("Upload încheiat (contorul serverului)", rows, false))
+	log.Printf("upload agregat: %s pe %s, %d ferestre măsurate",
+		FormatBytes(upTotal), streamCount(streams), len(measured))
 }
 
 // isLoopbackAddr reports whether an address belongs to this machine, which is

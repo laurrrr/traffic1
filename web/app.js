@@ -1205,6 +1205,8 @@ async function startTest() {
       sessionId: run.sessionId,
       role: 'control',
       streams: run.streams,
+      mode: run.mode,
+      direction: run.direction,
       ua: navigator.userAgent
     });
     run.control.on(MSG.PONG, onPong);

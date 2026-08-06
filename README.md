@@ -215,6 +215,42 @@ raportat: ar fi o cifră inventată.
 Cadrele de download sunt numărate de client, cele de upload de server — același
 principiu ca la octeți: numără capătul care știe ce a ajuns.
 
+### Ce se vede în terminal
+
+La începutul fiecărei rulări, serverul afișează cine testează și **fiecare
+stream cu tuplul lui TCP** — poți confirma din `ss` sau Wireshark că sunt chiar
+N conexiuni separate, și pe ce porturi sursă:
+
+```
+── 12:46:06 Test pornit ───────────────────────────────────
+   Client:    Android / Chrome (192.168.1.23)
+   Sesiune:   06a286be04ed21fa
+   Mod:       automat, 10 s pe direcție · download și upload · 4 streamuri · cadre de 64 KiB
+   Streamuri:
+     #0  192.168.1.23:35244 → 192.168.1.10:8080
+     ...
+```
+
+La sfârșitul fiecărei direcții, câte un tabel per stream:
+
+```
+── 12:46:16 Download încheiat (contorul serverului) ───────
+     #    Octeți       Cadre      Mbps        Cotă   Blocaje
+     0    154 MiB      2 456      128        25.2%         0
+     1    152 MiB      2 436      127        25.0%         0
+     2    153 MiB      2 444      127        25.0%         1
+     3    152 MiB      2 426      126        24.9%         0
+     tot  610 MiB      9 762      507                      1
+```
+
+**Coloana „Cotă" e motivul pentru care există tabelul.** Patru streamuri la 25%
+fiecare și unul la 90% cu trei la 3% dau exact același total, dar numai primul e
+o legătură sănătoasă. Când repartiția e vizibil strâmbă, tabelul o și spune în
+text, numind streamul.
+
+Cifrele din tabel sunt ale **serverului** — util ca diagnostic, dar la download
+cifra raportată rămâne a clientului (vezi mai sus de ce).
+
 ### Streamuri paralele
 
 Un singur stream TCP rareori saturează Wi-Fi-ul modern. Throughput-ul se agregă
