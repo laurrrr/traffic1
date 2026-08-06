@@ -11,6 +11,9 @@ repaus și latența sub sarcină. Un Wi-Fi care dă 900 Mbps dar urcă de la 3 m
 
 ## Quickstart
 
+Necesită **Go 1.25+**. Cu setările implicite (`GOTOOLCHAIN=auto`) Go descarcă
+singur toolchain-ul potrivit, deci merge și de pe o instalare mai veche.
+
 ```bash
 go build -o lantest .        # binar server-only (fără CGO, fără GUI)
 ./lantest
