@@ -254,7 +254,25 @@ button.stop { background: var(--err); color: #fff; border-color: transparent; }
   border-radius: var(--radius);
   background: var(--bg-soft);
   border: 1px solid var(--border);
+  cursor: crosshair;
+  /* Horizontal drags belong to the chart (they select a range to zoom into);
+     vertical ones still scroll the page, which matters on a phone. */
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
 }
+
+.chart-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  min-height: 30px;
+}
+.chart-tools button { padding: 5px 12px; font-size: 12px; }
+.chart-tools button[hidden] { display: none; }
+#chart-hint { line-height: 1.3; }
 
 /* ── result ──────────────────────────────────────────────────────────────── */
 

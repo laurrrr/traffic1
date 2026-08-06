@@ -210,14 +210,22 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// niceMax rounds an axis up to a readable value with a little headroom. The
+// steps are deliberately fine: with only 1/2/5/10 available, a peak of 1086
+// lands on 2000 and the plot uses half its height, which is the opposite of
+// what someone zooming in to read detail wants.
+var NICE_STEPS = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+
 function niceMax(v) {
   if (!isFinite(v) || v <= 0) return 1;
-  v *= 1.12;
+  v *= 1.08;
   var exp = Math.floor(Math.log10(v));
   var base = Math.pow(10, exp);
   var n = v / base;
-  var step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
-  return step * base;
+  for (var i = 0; i < NICE_STEPS.length; i++) {
+    if (n <= NICE_STEPS[i]) return NICE_STEPS[i] * base;
+  }
+  return 10 * base;
 }
 
 var PHASE_LABELS = {
@@ -250,14 +258,62 @@ function decimate(points, limit) {
   return out;
 }
 
+// Layout of the plot area inside the canvas. Shared between drawing and hit
+// testing: a click has to land on the same pixel the line was drawn at.
+var CHART_PAD = { t: 20, r: 54, b: 26, l: 56 };
+
+// MIN_ZOOM_MS stops a stray click from zooming to a zero-width window.
+var MIN_ZOOM_MS = 250;
+
+// sliceView narrows a series to the visible window, keeping one point beyond
+// each edge so lines run to the border instead of stopping short of it.
+function sliceView(points, from, to) {
+  if (!points.length) return points;
+  var a = 0, b = points.length - 1;
+  while (a < points.length && points[a].t < from) a++;
+  while (b >= 0 && points[b].t > to) b--;
+  if (a > 0) a--;
+  if (b < points.length - 1) b++;
+  if (a > b) return [];
+  return points.slice(a, b + 1);
+}
+
+function nearestPoint(points, tMs) {
+  if (!points.length) return null;
+  var best = points[0], bestD = Math.abs(points[0].t - tMs);
+  for (var i = 1; i < points.length; i++) {
+    var d = Math.abs(points[i].t - tMs);
+    if (d < bestD) { bestD = d; best = points[i]; }
+  }
+  return best;
+}
+
+function fmtClock(ms) {
+  if (ms >= 60000) {
+    var total = Math.floor(ms / 1000);
+    return Math.floor(total / 60) + ':' + ('0' + (total % 60)).slice(-2);
+  }
+  return (ms / 1000).toFixed(1) + 's';
+}
+
 // Chart draws throughput and latency on one timeline with two axes. Latency is
 // overlaid rather than shown separately on purpose: the whole point of the tool
 // is watching the latency line climb exactly while the throughput area fills.
+//
+// It is interactive: drag across it to zoom into a time range, wheel to zoom
+// around the pointer, double click (or double tap) to go back to the whole run.
+// Zooming is not just visual — the vertical scales and the decimation are both
+// recomputed from the visible window, so magnifying a quiet stretch actually
+// resolves detail that the full view had averaged away.
 function Chart(canvas) {
   this.canvas = canvas;
   this.ctx = canvas.getContext('2d');
   this.w = 0;
   this.h = 0;
+  this.view = null;    // {from,to} in ms; null means the whole run
+  this.sel = null;     // {x0,x1} in px while a selection drag is in progress
+  this.cursor = null;  // px, for the crosshair readout
+  this.onViewChange = null;
   this.reset();
 
   var self = this;
@@ -267,12 +323,17 @@ function Chart(canvas) {
     window.addEventListener('resize', function () { self.resize(); });
   }
   this.resize();
+  this.attach();
 }
 
 Chart.prototype.reset = function () {
   this.tp = [];
   this.lat = [];
   this.phases = [];
+  this.view = null;
+  this.sel = null;
+  this.cursor = null;
+  if (this.onViewChange) this.onViewChange();
   this.draw();
 };
 
@@ -315,11 +376,171 @@ Chart.prototype.maxT = function () {
   return m;
 };
 
-Chart.prototype.draw = function () {
-  this.render(this.ctx, this.w, this.h, null);
+Chart.prototype.hasData = function () {
+  return this.tp.length > 0 || this.lat.length > 0;
 };
 
-Chart.prototype.render = function (ctx, w, h, theme) {
+// fullRange is the whole run; range is what is currently on screen.
+Chart.prototype.fullRange = function () {
+  return { from: 0, to: Math.max(this.maxT(), 1000) };
+};
+
+Chart.prototype.range = function () {
+  return this.view || this.fullRange();
+};
+
+Chart.prototype.zoomed = function () { return !!this.view; };
+
+Chart.prototype.plot = function (w, h) {
+  w = w === undefined ? this.w : w;
+  h = h === undefined ? this.h : h;
+  return {
+    x: CHART_PAD.l,
+    y: CHART_PAD.t,
+    w: w - CHART_PAD.l - CHART_PAD.r,
+    h: h - CHART_PAD.t - CHART_PAD.b
+  };
+};
+
+Chart.prototype.timeAt = function (px) {
+  var p = this.plot(), r = this.range();
+  if (p.w <= 0) return r.from;
+  var f = (px - p.x) / p.w;
+  return r.from + Math.max(0, Math.min(1, f)) * (r.to - r.from);
+};
+
+Chart.prototype.setView = function (from, to) {
+  var full = this.fullRange();
+  from = Math.max(full.from, Math.min(from, to));
+  to = Math.min(full.to, Math.max(from, to));
+  if (to - from < MIN_ZOOM_MS) return;
+  // A window that covers everything is not a zoom; drop back to follow mode so
+  // a live run keeps extending the axis.
+  this.view = (from <= full.from && to >= full.to) ? null : { from: from, to: to };
+  if (this.onViewChange) this.onViewChange();
+  this.draw();
+};
+
+Chart.prototype.resetZoom = function () {
+  if (!this.view) return;
+  this.view = null;
+  if (this.onViewChange) this.onViewChange();
+  this.draw();
+};
+
+Chart.prototype.wheelZoom = function (px, deltaY) {
+  var r = this.range();
+  var span = r.to - r.from;
+  var focus = this.timeAt(px);
+  var span2 = span * (deltaY < 0 ? 0.75 : 1.35);
+  var full = this.fullRange();
+
+  if (span2 >= full.to - full.from) { this.resetZoom(); return; }
+  if (span2 < MIN_ZOOM_MS) span2 = MIN_ZOOM_MS;
+
+  var frac = span > 0 ? (focus - r.from) / span : 0.5;
+  this.setView(focus - frac * span2, focus + (1 - frac) * span2);
+};
+
+// attach wires pointer, wheel and double-tap handling. Pointer events cover
+// mouse, trackpad and touch with one code path.
+Chart.prototype.attach = function () {
+  var self = this;
+  var dragging = false;
+  var startX = 0;
+  var lastTap = 0;
+
+  function localX(e) {
+    return e.clientX - self.canvas.getBoundingClientRect().left;
+  }
+
+  function inPlot(x) {
+    var p = self.plot();
+    return x >= p.x && x <= p.x + p.w;
+  }
+
+  this.canvas.addEventListener('pointerdown', function (e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    if (!self.hasData()) return;
+    var x = localX(e);
+    if (!inPlot(x)) return;
+    dragging = true;
+    startX = x;
+    self.sel = { x0: x, x1: x };
+    try { self.canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault();
+  });
+
+  this.canvas.addEventListener('pointermove', function (e) {
+    if (!self.hasData()) return;
+    var x = localX(e);
+    self.cursor = inPlot(x) ? x : null;
+    if (dragging) self.sel = { x0: startX, x1: x };
+    self.draw();
+  });
+
+  this.canvas.addEventListener('pointerup', function (e) {
+    var x = localX(e);
+    try { self.canvas.releasePointerCapture(e.pointerId); } catch (err) {}
+
+    if (dragging) {
+      dragging = false;
+      self.sel = null;
+      // A drag of a few pixels is a click that wobbled, not a selection.
+      if (Math.abs(x - startX) > 6) {
+        self.zoomToPixels(startX, x);
+        lastTap = 0;
+        return;
+      }
+    }
+
+    // Double tap resets, since dblclick is unreliable on touch.
+    var now = Date.now();
+    if (now - lastTap < 350) {
+      self.resetZoom();
+      lastTap = 0;
+    } else {
+      lastTap = now;
+      self.draw();
+    }
+  });
+
+  this.canvas.addEventListener('pointercancel', function () {
+    dragging = false;
+    self.sel = null;
+    self.draw();
+  });
+
+  this.canvas.addEventListener('pointerleave', function () {
+    self.cursor = null;
+    if (!dragging) self.draw();
+  });
+
+  this.canvas.addEventListener('dblclick', function (e) {
+    e.preventDefault();
+    self.resetZoom();
+  });
+
+  this.canvas.addEventListener('wheel', function (e) {
+    if (!self.hasData()) return;
+    e.preventDefault();
+    self.wheelZoom(localX(e), e.deltaY);
+  }, { passive: false });
+};
+
+Chart.prototype.zoomToPixels = function (x0, x1) {
+  var a = this.timeAt(Math.min(x0, x1));
+  var b = this.timeAt(Math.max(x0, x1));
+  this.setView(a, b);
+};
+
+Chart.prototype.draw = function () {
+  this.render(this.ctx, this.w, this.h, null, true);
+};
+
+// render draws the chart. overlays covers the crosshair and the selection band,
+// which belong on screen but not in an exported image.
+Chart.prototype.render = function (ctx, w, h, theme, overlays) {
   if (!w || !h) return;
 
   var t = theme || {
@@ -327,13 +548,14 @@ Chart.prototype.render = function (ctx, w, h, theme) {
     grid: cssVar('--border'),
     muted: cssVar('--muted'),
     down: cssVar('--down'),
-    lat: cssVar('--lat')
+    lat: cssVar('--lat'),
+    fg: cssVar('--fg'),
+    card: cssVar('--card'),
+    border: cssVar('--border')
   };
 
-  var pad = { t: 20, r: 54, b: 26, l: 56 };
-  var pw = w - pad.l - pad.r;
-  var ph = h - pad.t - pad.b;
-  if (pw <= 0 || ph <= 0) return;
+  var p = this.plot(w, h);
+  if (p.w <= 0 || p.h <= 0) return;
 
   ctx.save();
   ctx.clearRect(0, 0, w, h);
@@ -342,7 +564,7 @@ Chart.prototype.render = function (ctx, w, h, theme) {
 
   var font = '10px -apple-system, system-ui, sans-serif';
 
-  if (!this.tp.length && !this.lat.length) {
+  if (!this.hasData()) {
     ctx.fillStyle = t.muted;
     ctx.font = '13px -apple-system, system-ui, sans-serif';
     ctx.textAlign = 'center';
@@ -351,45 +573,54 @@ Chart.prototype.render = function (ctx, w, h, theme) {
     return;
   }
 
-  var tMax = Math.max(this.maxT(), 1000);
-  var vMax = 0, lMax = 0, i;
-  for (i = 0; i < this.tp.length; i++) if (this.tp[i].v > vMax) vMax = this.tp[i].v;
-  for (i = 0; i < this.lat.length; i++) if (this.lat[i].v > lMax) lMax = this.lat[i].v;
+  var r = this.range();
+  var span = Math.max(r.to - r.from, 1);
+  var i;
+
+  // Everything below works from the visible window: the vertical scales and the
+  // decimation both follow the zoom, which is what makes zooming reveal detail
+  // rather than just enlarge the same averaged line.
+  var tpAll = sliceView(this.tp, r.from, r.to);
+  var latAll = sliceView(this.lat, r.from, r.to);
+
+  var vMax = 0, lMax = 0;
+  for (i = 0; i < tpAll.length; i++) if (tpAll[i].v > vMax) vMax = tpAll[i].v;
+  for (i = 0; i < latAll.length; i++) if (latAll[i].v > lMax) lMax = latAll[i].v;
   vMax = niceMax(vMax || 1);
   lMax = niceMax(lMax || 10);
 
-  // Scales come from the full series above; only the drawing is thinned.
-  var tp = decimate(this.tp, MAX_PLOT_POINTS);
-  var lat = decimate(this.lat, MAX_PLOT_POINTS);
+  var tp = decimate(tpAll, MAX_PLOT_POINTS);
+  var lat = decimate(latAll, MAX_PLOT_POINTS);
 
-  var X = function (ms) { return pad.l + (ms / tMax) * pw; };
-  var Y = function (v) { return pad.t + ph - (v / vMax) * ph; };
-  var L = function (v) { return pad.t + ph - (v / lMax) * ph; };
+  var X = function (ms) { return p.x + ((ms - r.from) / span) * p.w; };
+  var Y = function (v) { return p.y + p.h - (v / vMax) * p.h; };
+  var L = function (v) { return p.y + p.h - (v / lMax) * p.h; };
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(p.x, p.y, p.w, p.h);
+  ctx.clip();
 
   // Phase bands, so it is obvious which numbers belong to which direction.
   ctx.font = font;
   ctx.textAlign = 'center';
   for (i = 0; i < this.phases.length; i++) {
-    var p = this.phases[i];
-    if (p.to <= p.from) continue;
-    var x0 = X(p.from), x1 = X(p.to);
+    var ph = this.phases[i];
+    if (ph.to <= ph.from) continue;
+    var x0 = X(ph.from), x1 = X(ph.to);
+    if (x1 < p.x || x0 > p.x + p.w) continue;
     ctx.fillStyle = i % 2 ? 'rgba(127,127,127,.05)' : 'rgba(127,127,127,.10)';
-    ctx.fillRect(x0, pad.t, x1 - x0, ph);
-    var label = PHASE_LABELS[p.name] || p.name;
-    if (x1 - x0 > 54) {
-      ctx.fillStyle = t.muted;
-      ctx.fillText(label, (x0 + x1) / 2, pad.t - 7);
-    }
+    ctx.fillRect(x0, p.y, x1 - x0, p.h);
   }
 
   // Grid.
   ctx.strokeStyle = t.grid;
   ctx.lineWidth = 0.5;
   for (i = 0; i <= 4; i++) {
-    var gy = pad.t + (ph / 4) * i;
+    var gy = p.y + (p.h / 4) * i;
     ctx.beginPath();
-    ctx.moveTo(pad.l, gy);
-    ctx.lineTo(pad.l + pw, gy);
+    ctx.moveTo(p.x, gy);
+    ctx.lineTo(p.x + p.w, gy);
     ctx.stroke();
   }
 
@@ -412,6 +643,18 @@ Chart.prototype.render = function (ctx, w, h, theme) {
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.stroke();
+
+    // Once zoomed in far enough that samples are visibly apart, mark them: it
+    // makes it obvious where a reading actually is rather than implying the
+    // line was measured continuously.
+    if (tp.length > 1 && p.w / tp.length > 14) {
+      ctx.fillStyle = t.down;
+      for (i = 0; i < tp.length; i++) {
+        ctx.beginPath();
+        ctx.arc(X(tp[i].t), Y(tp[i].v), 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
   }
 
   // Latency line on the right axis.
@@ -426,39 +669,140 @@ Chart.prototype.render = function (ctx, w, h, theme) {
     ctx.stroke();
   }
 
-  // Axes.
+  // Selection band while a zoom drag is in progress.
+  if (overlays && this.sel) {
+    var sx0 = Math.min(this.sel.x0, this.sel.x1);
+    var sx1 = Math.max(this.sel.x0, this.sel.x1);
+    ctx.fillStyle = hexToRGBA(t.down, 0.18);
+    ctx.fillRect(sx0, p.y, sx1 - sx0, p.h);
+    ctx.strokeStyle = t.down;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(sx0 + 0.5, p.y); ctx.lineTo(sx0 + 0.5, p.y + p.h);
+    ctx.moveTo(sx1 - 0.5, p.y); ctx.lineTo(sx1 - 0.5, p.y + p.h);
+    ctx.stroke();
+  }
+
+  ctx.restore(); // end clip
+
+  // Phase labels sit above the plot, so they are drawn outside the clip.
   ctx.font = font;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = t.muted;
+  for (i = 0; i < this.phases.length; i++) {
+    var ph2 = this.phases[i];
+    if (ph2.to <= ph2.from) continue;
+    var a = Math.max(X(ph2.from), p.x), b = Math.min(X(ph2.to), p.x + p.w);
+    if (b - a > 54) {
+      ctx.fillText(PHASE_LABELS[ph2.name] || ph2.name, (a + b) / 2, p.y - 7);
+    }
+  }
+
+  // Axes.
   ctx.fillStyle = t.muted;
   for (i = 0; i <= 4; i++) {
-    var gy2 = pad.t + (ph / 4) * i;
+    var gy2 = p.y + (p.h / 4) * i;
     ctx.textAlign = 'right';
-    ctx.fillText(axisLabel(vMax * (4 - i) / 4), pad.l - 6, gy2 + 3);
+    ctx.fillText(axisLabel(vMax * (4 - i) / 4), p.x - 6, gy2 + 3);
     ctx.textAlign = 'left';
-    ctx.fillText(axisLabel(lMax * (4 - i) / 4), pad.l + pw + 6, gy2 + 3);
+    ctx.fillText(axisLabel(lMax * (4 - i) / 4), p.x + p.w + 6, gy2 + 3);
   }
   ctx.textAlign = 'center';
-  var longRun = tMax > 120000;
   for (i = 0; i <= 4; i++) {
-    var at = tMax * i / 4;
-    var label = longRun
-      ? Math.round(at / 60000) + 'm'
-      : (at / 1000).toFixed(0) + 's';
-    ctx.fillText(label, pad.l + (pw / 4) * i, h - pad.b + 15);
+    ctx.fillText(fmtClock(r.from + span * i / 4), p.x + (p.w / 4) * i, h - CHART_PAD.b + 15);
   }
 
   ctx.textAlign = 'left';
   ctx.fillStyle = t.down;
-  ctx.fillText('Mbps', pad.l - 46, pad.t - 7);
+  ctx.fillText('Mbps', p.x - 46, p.y - 7);
   ctx.textAlign = 'right';
   ctx.fillStyle = t.lat;
-  ctx.fillText('ms', w - 8, pad.t - 7);
+  ctx.fillText('ms', w - 8, p.y - 7);
 
+  // Crosshair readout.
+  if (overlays && this.cursor !== null && !this.sel) {
+    this.drawCursor(ctx, p, t, X, Y, L, tpAll, latAll);
+  }
+
+  ctx.restore();
+};
+
+Chart.prototype.drawCursor = function (ctx, p, t, X, Y, L, tpAll, latAll) {
+  var at = this.timeAt(this.cursor);
+  var tpPt = nearestPoint(tpAll, at);
+  var latPt = nearestPoint(latAll, at);
+  if (!tpPt && !latPt) return;
+
+  var cx = this.cursor;
+  ctx.save();
+  ctx.strokeStyle = t.muted;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(cx + 0.5, p.y);
+  ctx.lineTo(cx + 0.5, p.y + p.h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (tpPt) {
+    ctx.fillStyle = t.down;
+    ctx.beginPath();
+    ctx.arc(X(tpPt.t), Y(tpPt.v), 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (latPt) {
+    ctx.fillStyle = t.lat;
+    ctx.beginPath();
+    ctx.arc(X(latPt.t), L(latPt.v), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  var lines = [fmtClock(at)];
+  if (tpPt) lines.push(fmtMbps(tpPt.v) + ' Mbps');
+  if (latPt) lines.push(fmtMs(latPt.v) + ' ms');
+
+  ctx.font = '11px -apple-system, system-ui, sans-serif';
+  var wBox = 0;
+  for (var i = 0; i < lines.length; i++) {
+    wBox = Math.max(wBox, ctx.measureText(lines[i]).width);
+  }
+  wBox += 16;
+  var hBox = 14 * lines.length + 10;
+  var bx = cx + 10;
+  if (bx + wBox > p.x + p.w) bx = cx - 10 - wBox;
+  var by = p.y + 6;
+
+  ctx.fillStyle = t.card || t.bg;
+  ctx.strokeStyle = t.border || t.grid;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.96;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(bx, by, wBox, hBox, 6);
+  else ctx.rect(bx, by, wBox, hBox);
+  ctx.fill();
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  ctx.textAlign = 'left';
+  var ty = by + 16;
+  ctx.fillStyle = t.muted;
+  ctx.fillText(lines[0], bx + 8, ty);
+  if (tpPt) {
+    ty += 14;
+    ctx.fillStyle = t.down;
+    ctx.fillText(lines[1], bx + 8, ty);
+  }
+  if (latPt) {
+    ty += 14;
+    ctx.fillStyle = t.lat;
+    ctx.fillText(lines[lines.length - 1], bx + 8, ty);
+  }
   ctx.restore();
 };
 
 function axisLabel(v) {
   if (v >= 100) return v.toFixed(0);
-  if (v >= 10) return v.toFixed(0);
+  if (v >= 10) return v % 1 === 0 ? v.toFixed(0) : v.toFixed(1);
   if (v >= 1) return v.toFixed(1);
   return v.toFixed(2);
 }
@@ -1464,13 +1808,24 @@ function exportPNG() {
   ctx.font = '18px -apple-system, system-ui, sans-serif';
   wrapText(ctx, r.verdict || '', 44, 118, W - 88, 26);
 
-  var boxes = [
-    ['Download p50', fmtMbps(r.download.p50_mbps) + ' Mbps', '#2563eb'],
-    ['Upload p50', fmtMbps(r.upload.p50_mbps) + ' Mbps', '#059669'],
-    ['Latență repaus', fmtMs(r.latency.idle.p50_ms) + ' ms', '#d97706'],
-    ['Sub sarcină p95', fmtMs(r.bufferbloat.loaded_p95_ms) + ' ms', '#d97706']
-  ];
-  var bw = (W - 88 - 30) / 4;
+  // Same rule as the result cards: a direction that was never measured gets no
+  // box, rather than a box reading 0.00 Mbps.
+  var dir = r.direction || DIR_BOTH;
+  var boxes = [];
+  if (dir !== DIR_UP) {
+    boxes.push(['Download p50', fmtMbps(r.download.p50_mbps) + ' Mbps', '#2563eb']);
+    boxes.push(['Download min / max',
+      fmtMbps(r.download.min_mbps) + ' / ' + fmtMbps(r.download.max_mbps), '#2563eb']);
+  }
+  if (dir !== DIR_DOWN) {
+    boxes.push(['Upload p50', fmtMbps(r.upload.p50_mbps) + ' Mbps', '#059669']);
+    boxes.push(['Upload min / max',
+      fmtMbps(r.upload.min_mbps) + ' / ' + fmtMbps(r.upload.max_mbps), '#059669']);
+  }
+  boxes.push(['Latență repaus', fmtMs(r.latency.idle.p50_ms) + ' ms', '#d97706']);
+  boxes.push(['Sub sarcină p95', fmtMs(r.bufferbloat.loaded_p95_ms) + ' ms', '#d97706']);
+
+  var bw = (W - 88 - 10 * (boxes.length - 1)) / boxes.length;
   for (var i = 0; i < boxes.length; i++) {
     var x = 44 + i * (bw + 10);
     ctx.fillStyle = '#f4f5f7';
@@ -1479,19 +1834,23 @@ function exportPNG() {
     ctx.font = '12px -apple-system, system-ui, sans-serif';
     ctx.fillText(boxes[i][0], x + 14, 202);
     ctx.fillStyle = boxes[i][2];
-    ctx.font = '600 26px -apple-system, system-ui, sans-serif';
+    ctx.font = '600 ' + (boxes.length > 4 ? 20 : 26) + 'px -apple-system, system-ui, sans-serif';
     ctx.fillText(boxes[i][1], x + 14, 236);
   }
 
   ctx.save();
   ctx.translate(44, 280);
-  chart.render(ctx, W - 88, 340, theme);
+  chart.render(ctx, W - 88, 340, theme, false);
   ctx.restore();
 
   ctx.fillStyle = '#6b7280';
   ctx.font = '12px -apple-system, system-ui, sans-serif';
+  var scope = chart.zoomed()
+    ? 'Grafic mărit: ' + fmtClock(chart.range().from) + ' – ' + fmtClock(chart.range().to) +
+      ' din rulare. Cifrele de mai sus acoperă toată rularea.'
+    : '';
   ctx.fillText('Bufferbloat: nota ' + r.bufferbloat.grade + ' — ' + r.bufferbloat.label +
-    ' (+' + fmtMs(r.bufferbloat.delta_ms) + ' ms sub sarcină)', 44, 654);
+    ' (+' + fmtMs(r.bufferbloat.delta_ms) + ' ms sub sarcină)' + (scope ? '   ·   ' + scope : ''), 44, 654);
   ctx.fillText('Primele ' + r.warmup_discarded_ms + ' ms din fiecare direcție sunt eliminate (TCP slow-start). ' +
     'Pierdere de pachete: ' + r.packet_loss + '.', 44, 676);
 
@@ -1609,8 +1968,29 @@ async function loadURLs() {
   } catch (e) {}
 }
 
+// updateZoomUI keeps the hint honest about what is on screen. The distinction
+// matters: zooming changes the picture, never the reported numbers, which are
+// always computed over the whole run.
+function updateZoomUI() {
+  var zoomed = chart.zoomed();
+  var btn = $('btn-zoom-reset');
+  if (btn) btn.hidden = !zoomed;
+  var hint = $('chart-hint');
+  if (!hint) return;
+  if (zoomed) {
+    var r = chart.range();
+    hint.textContent = 'Mărit pe ' + fmtClock(r.from) + ' – ' + fmtClock(r.to) +
+      ' · dublu-clic pentru tot intervalul · cifrele din carduri rămân pe toată rularea';
+  } else {
+    hint.textContent = 'Trage peste grafic ca să mărești un interval · rotița mărește · dublu-clic revine';
+  }
+}
+
 function init() {
   chart = new Chart($('chart'));
+  chart.onViewChange = updateZoomUI;
+  updateZoomUI();
+  $('btn-zoom-reset').addEventListener('click', function () { chart.resetZoom(); });
 
   applyLayout(preferredLayout());
   var savedStreams = parseInt(load('lantest.streams'), 10);

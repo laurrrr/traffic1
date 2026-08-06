@@ -77,7 +77,13 @@
     </div>
 
     <div class="progress"><div id="progress-bar"></div></div>
-    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+      <div class="chart-tools">
+        <span id="chart-hint" class="muted small"></span>
+        <button id="btn-zoom-reset" class="ghost" type="button" hidden>Tot intervalul</button>
+      </div>
+    </div>
 
     <div class="live-actions">
       <button id="btn-stop" class="stop" type="button">Oprește testul</button>

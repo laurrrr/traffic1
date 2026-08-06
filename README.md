@@ -149,6 +149,26 @@ o prăbușire de throughput care nu a existat.
 Se raportează percentile, niciodată medii goale: o singură fereastră blocată
 strică o medie.
 
+### Grafic interactiv
+
+Graficul nu e doar o imagine. Trage peste el ca să mărești un interval, folosește
+rotița ca să mărești în jurul cursorului, dublu-clic (sau dublu-tap) ca să revii
+la toată rularea. Cursorul afișează valorile exacte din punctul respectiv:
+momentul, throughput-ul și latența.
+
+Zoom-ul nu e doar vizual — **scările verticale și decimarea se recalculează din
+fereastra vizibilă**. Într-o rulare de câteva minute, graficul complet e redus la
+900 de puncte (păstrând vârful fiecărui interval); dacă mărești pe 5 secunde,
+vezi eșantioanele individuale, marcate cu puncte. Asta e diferența dintre a
+mări o imagine și a rezolva detaliu.
+
+Pe telefon, tragerea orizontală aparține graficului, iar cea verticală derulează
+pagina în continuare.
+
+Zoom-ul schimbă **doar imaginea**. Cifrele din carduri și din verdict se
+calculează întotdeauna pe toată rularea — de asta scrie asta lângă grafic când e
+mărit. Exportul PNG păstrează intervalul afișat și notează în subsol care e.
+
 ### „Cadre", nu pachete
 
 Se raportează numărul de **mesaje WebSocket** și dimensiunea încărcăturii utile
