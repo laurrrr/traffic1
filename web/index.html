@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>lantest — test de rețea LAN</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M5 22 L11 14 L17 18 L27 7' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
+</head>
+<body>
+
+<div id="app" data-layout="client" data-state="waiting">
+
+  <header id="topbar">
+    <div class="brand">
+      <span class="dot" id="conn-dot"></span>
+      <h1>lantest</h1>
+    </div>
+    <div class="topbar-right">
+      <span id="net-label" class="muted"></span>
+      <button id="layout-toggle" class="ghost" type="button" title="Comută între vederea de desktop și cea de telefon">Vedere</button>
+    </div>
+  </header>
+
+  <div id="banner" hidden></div>
+
+  <!-- ── Ecran de start, vederea desktop ─────────────────────────────────── -->
+  <section id="panel-connect">
+    <div class="connect-grid">
+      <div class="qr-card">
+        <img id="qr" alt="Cod QR cu adresa serverului" width="220" height="220">
+        <p class="muted small">Scanează cu telefonul</p>
+      </div>
+
+      <div class="connect-info">
+        <h2>Deschide pe telefon</h2>
+        <ul id="url-list" class="urls"></ul>
+
+        <div id="peer-status" class="peer waiting">
+          <span class="pulse"></span>
+          <span id="peer-text">Aștept telefonul…</span>
+        </div>
+
+        <div class="start-local">
+          <button id="btn-start-local" class="primary" type="button">Testează de pe acest calculator</button>
+          <p class="muted small">Măsoară bucla locală, nu Wi-Fi-ul. Folosește telefonul pentru rezultate reale.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Ecran de start, vederea telefon ─────────────────────────────────── -->
+  <section id="panel-ready">
+    <button id="btn-start" class="huge" type="button">Pornește testul</button>
+    <p class="muted center">Durează în jur de 25 de secunde.<br>Ține ecranul aprins.</p>
+  </section>
+
+  <!-- ── În timpul testului ──────────────────────────────────────────────── -->
+  <section id="panel-live">
+    <div class="live-head">
+      <div>
+        <div id="phase-label" class="phase">Se pregătește…</div>
+        <div id="phase-sub" class="muted small"></div>
+      </div>
+      <div class="live-metrics">
+        <div class="metric">
+          <span class="metric-value" id="live-mbps">--</span>
+          <span class="metric-unit">Mbps</span>
+        </div>
+        <div class="metric latency">
+          <span class="metric-value" id="live-rtt">--</span>
+          <span class="metric-unit">ms</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="progress"><div id="progress-bar"></div></div>
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+
+    <div class="live-actions">
+      <button id="btn-stop" class="stop" type="button">Oprește testul</button>
+    </div>
+  </section>
+
+  <!-- ── Rezultat ────────────────────────────────────────────────────────── -->
+  <section id="panel-result">
+    <div class="verdict-card">
+      <div id="grade" class="grade">–</div>
+      <p id="verdict" class="verdict"></p>
+    </div>
+
+    <div id="comparison" class="comparison" hidden></div>
+
+    <div class="cards">
+      <div class="card down" id="down-card-wrap">
+        <h3>Download</h3>
+        <div class="big"><span id="r-down-p50">--</span><span class="unit">Mbps</span></div>
+        <div class="sub muted">min <span id="r-down-min">--</span> · max <span id="r-down-max">--</span></div>
+      </div>
+      <div class="card up" id="up-card-wrap">
+        <h3>Upload</h3>
+        <div class="big"><span id="r-up-p50">--</span><span class="unit">Mbps</span></div>
+        <div class="sub muted">min <span id="r-up-min">--</span> · max <span id="r-up-max">--</span></div>
+      </div>
+      <div class="card lat">
+        <h3>Latență în repaus</h3>
+        <div class="big"><span id="r-lat-idle">--</span><span class="unit">ms</span></div>
+        <div class="sub muted">jitter <span id="r-lat-jitter">--</span></div>
+      </div>
+      <div class="card bloat">
+        <h3>Latență sub sarcină</h3>
+        <div class="big"><span id="r-lat-loaded">--</span><span class="unit">ms</span></div>
+        <div class="sub muted">creștere <span id="r-bloat-delta">--</span></div>
+      </div>
+      <div class="card frames" id="frames-card">
+        <h3>Cadre trimise</h3>
+        <div class="big"><span id="r-frames">--</span></div>
+        <div class="sub muted"><span id="r-frame-size">--</span></div>
+      </div>
+      <div class="card dur" id="duration-card">
+        <h3>Durată</h3>
+        <div class="big"><span id="r-duration">--</span></div>
+        <div class="sub muted"><span id="r-mode">--</span></div>
+      </div>
+    </div>
+
+    <div id="caveats" class="caveats" hidden></div>
+
+    <div class="actions">
+      <button id="btn-again" class="primary" type="button">Rulează din nou</button>
+      <button id="btn-json" class="ghost" type="button">Export JSON</button>
+      <button id="btn-png" class="ghost" type="button">Export PNG</button>
+    </div>
+
+    <details id="advanced">
+      <summary>Avansat</summary>
+      <div class="advanced-body">
+        <table class="kv">
+          <tbody>
+            <tr><th>Streamuri paralele</th><td id="a-streams">–</td></tr>
+            <tr><th>Download p50 / p95 / max</th><td id="a-down">–</td></tr>
+            <tr><th>Upload p50 / p95 / max</th><td id="a-up">–</td></tr>
+            <tr><th>Latență repaus min / p50 / p95</th><td id="a-lat-idle">–</td></tr>
+            <tr><th>Latență sub download p50 / p95</th><td id="a-lat-down">–</td></tr>
+            <tr><th>Latență sub upload p50 / p95</th><td id="a-lat-up">–</td></tr>
+            <tr><th>Bufferbloat</th><td id="a-bloat">–</td></tr>
+            <tr><th>Blocaj fir principal browser</th><td id="a-lag">–</td></tr>
+            <tr><th>Tampon implicat de latență</th><td id="a-buffer">–</td></tr>
+            <tr><th>Mod și direcție</th><td id="a-mode">–</td></tr>
+            <tr><th>Cadre download / upload</th><td id="a-frames">–</td></tr>
+            <tr><th>Dimensiunea unui cadru</th><td id="a-framesize">–</td></tr>
+            <tr><th>Warmup eliminat</th><td id="a-warmup">–</td></tr>
+            <tr><th>Octeți măsurați (client)</th><td id="a-bytes">–</td></tr>
+            <tr><th>Diferență față de contorul serverului</th><td id="a-delta">–</td></tr>
+            <tr><th>Pierdere de pachete</th><td id="a-loss">–</td></tr>
+            <tr><th>Rețea</th><td id="a-net">–</td></tr>
+            <tr><th>Client</th><td id="a-client">–</td></tr>
+            <tr><th>Moment</th><td id="a-time">–</td></tr>
+          </tbody>
+        </table>
+        <p class="muted small">
+          Download-ul este numărat de client, singurul capăt care știe ce a ajuns
+          efectiv. Upload-ul este numărat de server, din același motiv. Primele
+          <span id="a-warmup-inline">1000</span> ms din fiecare direcție sunt
+          eliminate înainte de percentile, pentru că TCP slow-start nu descrie
+          starea stabilă a legăturii.
+        </p>
+        <p class="muted small">
+          „Cadrele" sunt mesaje WebSocket, nu pachete IP. TCP le re-segmentează
+          după MTU-ul căii — un cadru de 64 KiB devine în jur de 45 de segmente
+          pe o cale obișnuită. Numărul real de pachete de pe fir nu poate fi
+          observat dintr-un browser, așa că nu e raportat.
+        </p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ── Setări ──────────────────────────────────────────────────────────── -->
+  <section id="panel-settings">
+    <div class="settings-grid">
+      <div class="setting">
+        <label>Direcție</label>
+        <div class="segmented" id="direction" role="group" aria-label="Direcția testului">
+          <button type="button" data-direction="both">Ambele</button>
+          <button type="button" data-direction="download">Download</button>
+          <button type="button" data-direction="upload">Upload</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <label>Durată</label>
+        <div class="segmented" id="mode" role="group" aria-label="Durata testului">
+          <button type="button" data-mode="auto">10 s fix</button>
+          <button type="button" data-mode="manual">Până la Stop</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <label>Streamuri paralele</label>
+        <div class="segmented" id="streams" role="group" aria-label="Streamuri paralele">
+          <button type="button" data-streams="1">1</button>
+          <button type="button" data-streams="4">4</button>
+          <button type="button" data-streams="8">8</button>
+        </div>
+      </div>
+    </div>
+    <p class="muted small" id="settings-hint">
+      Un singur stream TCP rareori saturează Wi-Fi-ul modern. Rulările de 10 s
+      sunt cele comparabile în istoric.
+    </p>
+  </section>
+
+  <!-- ── Istoric ─────────────────────────────────────────────────────────── -->
+  <section id="panel-history">
+    <h2>Rulări anterioare</h2>
+    <div id="history-list" class="history"></div>
+  </section>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
