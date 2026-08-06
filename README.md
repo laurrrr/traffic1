@@ -29,7 +29,9 @@ repaus și latența sub sarcină. Un Wi-Fi care dă 900 Mbps dar urcă de la 3 m
 11. [Limitările reale ale metodei](#limitările-reale-ale-metodei)
 12. [Securitate](#securitate)
 13. [Probleme frecvente](#probleme-frecvente)
-14. [Dezvoltare](#dezvoltare)
+14. [Ce nu e implementat](#ce-nu-e-implementat)
+15. [Dezvoltare](#dezvoltare)
+16. [Licență](#licență)
 
 ---
 
