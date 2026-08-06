@@ -78,6 +78,10 @@
 
     <div class="progress"><div id="progress-bar"></div></div>
     <div class="chart-wrap"><canvas id="chart"></canvas></div>
+
+    <div class="live-actions">
+      <button id="btn-stop" class="stop" type="button">Oprește testul</button>
+    </div>
   </section>
 
   <!-- ── Rezultat ────────────────────────────────────────────────────────── -->
@@ -90,15 +94,15 @@
     <div id="comparison" class="comparison" hidden></div>
 
     <div class="cards">
-      <div class="card down">
+      <div class="card down" id="down-card-wrap">
         <h3>Download</h3>
         <div class="big"><span id="r-down-p50">--</span><span class="unit">Mbps</span></div>
-        <div class="sub muted">p95 <span id="r-down-p95">--</span></div>
+        <div class="sub muted">min <span id="r-down-min">--</span> · max <span id="r-down-max">--</span></div>
       </div>
-      <div class="card up">
+      <div class="card up" id="up-card-wrap">
         <h3>Upload</h3>
         <div class="big"><span id="r-up-p50">--</span><span class="unit">Mbps</span></div>
-        <div class="sub muted">p95 <span id="r-up-p95">--</span></div>
+        <div class="sub muted">min <span id="r-up-min">--</span> · max <span id="r-up-max">--</span></div>
       </div>
       <div class="card lat">
         <h3>Latență în repaus</h3>
@@ -109,6 +113,16 @@
         <h3>Latență sub sarcină</h3>
         <div class="big"><span id="r-lat-loaded">--</span><span class="unit">ms</span></div>
         <div class="sub muted">creștere <span id="r-bloat-delta">--</span></div>
+      </div>
+      <div class="card frames" id="frames-card">
+        <h3>Cadre trimise</h3>
+        <div class="big"><span id="r-frames">--</span></div>
+        <div class="sub muted"><span id="r-frame-size">--</span></div>
+      </div>
+      <div class="card dur" id="duration-card">
+        <h3>Durată</h3>
+        <div class="big"><span id="r-duration">--</span></div>
+        <div class="sub muted"><span id="r-mode">--</span></div>
       </div>
     </div>
 
@@ -134,6 +148,9 @@
             <tr><th>Bufferbloat</th><td id="a-bloat">–</td></tr>
             <tr><th>Blocaj fir principal browser</th><td id="a-lag">–</td></tr>
             <tr><th>Tampon implicat de latență</th><td id="a-buffer">–</td></tr>
+            <tr><th>Mod și direcție</th><td id="a-mode">–</td></tr>
+            <tr><th>Cadre download / upload</th><td id="a-frames">–</td></tr>
+            <tr><th>Dimensiunea unui cadru</th><td id="a-framesize">–</td></tr>
             <tr><th>Warmup eliminat</th><td id="a-warmup">–</td></tr>
             <tr><th>Octeți măsurați (client)</th><td id="a-bytes">–</td></tr>
             <tr><th>Diferență față de contorul serverului</th><td id="a-delta">–</td></tr>
@@ -150,19 +167,49 @@
           eliminate înainte de percentile, pentru că TCP slow-start nu descrie
           starea stabilă a legăturii.
         </p>
+        <p class="muted small">
+          „Cadrele" sunt mesaje WebSocket, nu pachete IP. TCP le re-segmentează
+          după MTU-ul căii — un cadru de 64 KiB devine în jur de 45 de segmente
+          pe o cale obișnuită. Numărul real de pachete de pe fir nu poate fi
+          observat dintr-un browser, așa că nu e raportat.
+        </p>
       </div>
     </details>
   </section>
 
   <!-- ── Setări ──────────────────────────────────────────────────────────── -->
   <section id="panel-settings">
-    <label for="streams">Streamuri paralele</label>
-    <div class="segmented" id="streams" role="group" aria-label="Streamuri paralele">
-      <button type="button" data-streams="1">1</button>
-      <button type="button" data-streams="4">4</button>
-      <button type="button" data-streams="8">8</button>
+    <div class="settings-grid">
+      <div class="setting">
+        <label>Direcție</label>
+        <div class="segmented" id="direction" role="group" aria-label="Direcția testului">
+          <button type="button" data-direction="both">Ambele</button>
+          <button type="button" data-direction="download">Download</button>
+          <button type="button" data-direction="upload">Upload</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <label>Durată</label>
+        <div class="segmented" id="mode" role="group" aria-label="Durata testului">
+          <button type="button" data-mode="auto">10 s fix</button>
+          <button type="button" data-mode="manual">Până la Stop</button>
+        </div>
+      </div>
+
+      <div class="setting">
+        <label>Streamuri paralele</label>
+        <div class="segmented" id="streams" role="group" aria-label="Streamuri paralele">
+          <button type="button" data-streams="1">1</button>
+          <button type="button" data-streams="4">4</button>
+          <button type="button" data-streams="8">8</button>
+        </div>
+      </div>
     </div>
-    <p class="muted small">Un singur stream TCP rareori saturează Wi-Fi-ul modern.</p>
+    <p class="muted small" id="settings-hint">
+      Un singur stream TCP rareori saturează Wi-Fi-ul modern. Rulările de 10 s
+      sunt cele comparabile în istoric.
+    </p>
   </section>
 
   <!-- ── Istoric ─────────────────────────────────────────────────────────── -->

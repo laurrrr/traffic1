@@ -15,8 +15,16 @@ const (
 	WarmupMs int64 = 1000
 
 	// schedulingLagNoiseMs is how much client-side timer lateness counts as
-	// noise rather than as a threat to the latency figures.
-	schedulingLagNoiseMs = 5.0
+	// noise. Browser timers routinely drift by several milliseconds while a
+	// transfer is running, so this sits above ordinary drift rather than at it.
+	schedulingLagNoiseMs = 15.0
+
+	// bufferbloatConcernMs is where a grade starts telling someone their network
+	// has a problem (the B/C boundary). Below it the answer is "this link is
+	// fine under load", and that conclusion does not change if a few
+	// milliseconds of the increase were the measuring device rather than the
+	// path — so the trust checks only gate grades that would actually alarm.
+	bufferbloatConcernMs = 30.0
 
 	// minAnsweredRatio is how many of the pings issued during a load phase must
 	// eventually come back for its latency figure to mean anything.
@@ -121,6 +129,38 @@ type Bufferbloat struct {
 	// Trustworthy is false when the measured increase describes the measuring
 	// device rather than the link.
 	Trustworthy bool `json:"trustworthy"`
+}
+
+// FrameStats counts the WebSocket messages a run moved.
+//
+// These are application frames, not IP packets. A 64 KB frame becomes roughly
+// 45 segments on a 1500-byte-MTU path, and nothing in a browser can see that
+// number, so reporting it as "packets" would be inventing a figure. What is
+// reported is what was actually counted: messages, and the payload size of one.
+type FrameStats struct {
+	DownloadCount int64 `json:"download_count"`
+	UploadCount   int64 `json:"upload_count"`
+	DownloadBytes int64 `json:"download_bytes"`
+	UploadBytes   int64 `json:"upload_bytes"`
+	// FrameBytes is the configured payload size of a single test frame.
+	FrameBytes int `json:"frame_bytes"`
+}
+
+// AvgDownloadBytes is the mean payload actually delivered per frame. It differs
+// from FrameBytes only if a frame was truncated.
+func (f FrameStats) AvgDownloadBytes() float64 {
+	if f.DownloadCount == 0 {
+		return 0
+	}
+	return float64(f.DownloadBytes) / float64(f.DownloadCount)
+}
+
+// AvgUploadBytes is the mean payload actually received per uploaded frame.
+func (f FrameStats) AvgUploadBytes() float64 {
+	if f.UploadCount == 0 {
+		return 0
+	}
+	return float64(f.UploadBytes) / float64(f.UploadCount)
 }
 
 // Mbps converts a byte count observed over d into megabits per second.
@@ -298,31 +338,37 @@ func ComputeBufferbloat(r LatencyReport, peakMbps float64) Bufferbloat {
 	bb.DeltaMs = math.Max(0, loaded-r.Idle.P50Ms)
 	bb.Grade, bb.Label = GradeBufferbloat(bb.DeltaMs)
 
-	// Two ways the measurement can describe the device instead of the link.
+	bb.SchedulingLagMs = r.Scheduling.P95Ms
+	bb.AnsweredRatio = math.Min(r.LoadedDownload.AnsweredRatio(), r.LoadedUpload.AnsweredRatio())
+	if bb.DeltaMs > 0 && peakMbps > 0 {
+		// Queueing delay is buffer divided by rate, so rate times delay gives
+		// the buffer the increase would have taken.
+		bb.ImpliedBufferBytes = int64(bb.DeltaMs / 1000 * peakMbps * 1e6 / 8)
+	}
+
+	// A grade of A or B is not an accusation, so it does not need defending.
+	// Gating it would invalidate perfectly good runs over a few milliseconds of
+	// ordinary timer drift.
+	if bb.DeltaMs < bufferbloatConcernMs {
+		bb.Trustworthy = true
+		return bb
+	}
+
+	// Above that, three ways the measurement can be describing the device
+	// rather than the link.
 	//
 	// One: the client could not run its own code, so it timed its own delay.
-	// Below a few milliseconds that is noise; once it accounts for half the
-	// increase, the grade is about the browser.
-	bb.SchedulingLagMs = r.Scheduling.P95Ms
 	lagOK := bb.SchedulingLagMs < schedulingLagNoiseMs || bb.DeltaMs > 2*bb.SchedulingLagMs
 
-	// Two: most pings issued during the load never came back while it lasted.
-	// Whatever did come back is, by construction, the slowest tail — and on a
-	// link fast enough to saturate the client's own network stack, that says
-	// more about the stack than about buffering in the path.
-	bb.AnsweredRatio = math.Min(r.LoadedDownload.AnsweredRatio(), r.LoadedUpload.AnsweredRatio())
+	// Two: most pings issued during the load never came back. Whatever did is,
+	// by construction, the slowest tail.
 	answeredOK := bb.AnsweredRatio >= minAnsweredRatio
 
-	// Three: the increase implies more buffering than the path could hold.
-	// Queueing delay is buffer divided by rate, so rate times delay gives the
-	// buffer it would have taken. This is the check that catches a client whose
-	// own message queue ran seconds deep while its timers still fired on time —
-	// nothing on the client side looks wrong, but the physics does not close.
-	plausibleOK := true
-	if bb.DeltaMs > 0 && peakMbps > 0 {
-		bb.ImpliedBufferBytes = int64(bb.DeltaMs / 1000 * peakMbps * 1e6 / 8)
-		plausibleOK = bb.ImpliedBufferBytes <= maxPlausibleBufferBytes
-	}
+	// Three: the increase implies more buffering than the path could hold. This
+	// is the one that catches a client whose own message queue ran seconds deep
+	// while its timers still fired on time — nothing client-side looks wrong,
+	// but the physics does not close.
+	plausibleOK := bb.ImpliedBufferBytes <= maxPlausibleBufferBytes
 
 	bb.Trustworthy = lagOK && answeredOK && plausibleOK
 	return bb
@@ -331,7 +377,7 @@ func ComputeBufferbloat(r LatencyReport, peakMbps float64) Bufferbloat {
 // BuildVerdict turns the numbers into a sentence a human can act on. This lives
 // in Go rather than the frontend so the phone, the desktop window and the
 // history file never disagree about what a run means.
-func BuildVerdict(down, up DirStats, bb Bufferbloat, aborted bool) string {
+func BuildVerdict(down, up DirStats, bb Bufferbloat, direction string, aborted bool) string {
 	if aborted {
 		return "Rulare întreruptă — cifrele de mai jos sunt parțiale și nu trebuie folosite pentru comparații."
 	}
@@ -339,8 +385,18 @@ func BuildVerdict(down, up DirStats, bb Bufferbloat, aborted bool) string {
 		return "Nicio măsurătoare validă: rulare prea scurtă sau conexiune pierdută."
 	}
 
-	speed := fmt.Sprintf("Rețeaua ta livrează %s la download și %s la upload.",
-		FormatMbps(down.P50Mbps), FormatMbps(up.P50Mbps))
+	// A single-direction run must not claim a figure for the direction it never
+	// measured.
+	var speed string
+	switch {
+	case direction == DirectionDownload || up.Samples == 0:
+		speed = fmt.Sprintf("Rețeaua ta livrează %s la download.", FormatMbps(down.P50Mbps))
+	case direction == DirectionUpload || down.Samples == 0:
+		speed = fmt.Sprintf("Rețeaua ta livrează %s la upload.", FormatMbps(up.P50Mbps))
+	default:
+		speed = fmt.Sprintf("Rețeaua ta livrează %s la download și %s la upload.",
+			FormatMbps(down.P50Mbps), FormatMbps(up.P50Mbps))
+	}
 
 	if bb.Grade == "?" {
 		return speed + " Latența sub sarcină nu a putut fi măsurată."
@@ -377,15 +433,17 @@ func FormatMbps(v float64) string {
 }
 
 // FormatBytes prints a byte count in the largest unit that keeps it readable.
+// Binary divisors with binary labels: these are buffer and frame sizes, which
+// are powers of two, and calling 65536 bytes "66 kB" reads as a mistake.
 func FormatBytes(n int64) string {
 	f := float64(n)
 	switch {
 	case f >= 1<<30:
-		return fmt.Sprintf("%.1f GB", f/(1<<30))
+		return fmt.Sprintf("%.1f GiB", f/(1<<30))
 	case f >= 1<<20:
-		return fmt.Sprintf("%.0f MB", f/(1<<20))
+		return fmt.Sprintf("%.0f MiB", f/(1<<20))
 	case f >= 1<<10:
-		return fmt.Sprintf("%.0f kB", f/(1<<10))
+		return fmt.Sprintf("%.0f KiB", f/(1<<10))
 	default:
 		return fmt.Sprintf("%d B", n)
 	}

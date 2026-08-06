@@ -123,6 +123,15 @@ button:active:not(:disabled) { opacity: .8; }
   border-radius: 16px;
 }
 
+/* Stopping a run is a different action from starting one, so it does not get
+   to look like the start button. It also has to live on the screen that is
+   actually visible while a run is going: the start panel is hidden by then. */
+button.stop { background: var(--err); color: #fff; border-color: transparent; }
+.live-actions { margin-top: 14px; display: none; }
+.live-actions button { width: 100%; padding: 16px; font-size: 17px; font-weight: 650; }
+[data-running="manual"] .live-actions { display: block; }
+[data-layout="host"] .live-actions button { width: auto; padding: 12px 28px; }
+
 /* ── banner ──────────────────────────────────────────────────────────────── */
 
 #banner {
@@ -298,6 +307,8 @@ button:active:not(:disabled) { opacity: .8; }
 .card.down .big { color: var(--down); }
 .card.up .big { color: var(--up); }
 .card.lat .big, .card.bloat .big { color: var(--lat); }
+.card.frames .big, .card.dur .big { color: var(--fg); font-size: 22px; }
+.card.frames .sub, .card.dur .sub { line-height: 1.35; }
 
 .caveats {
   margin-top: 14px;
@@ -336,6 +347,8 @@ button:active:not(:disabled) { opacity: .8; }
 
 /* ── settings ────────────────────────────────────────────────────────────── */
 
+.settings-grid { display: flex; flex-wrap: wrap; gap: 18px; }
+.setting { display: flex; flex-direction: column; }
 #panel-settings label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .segmented button {
@@ -346,6 +359,8 @@ button:active:not(:disabled) { opacity: .8; }
 }
 .segmented button + button { border-left: 1px solid var(--border); }
 .segmented button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.segmented button:disabled { opacity: .35; cursor: not-allowed; }
+.segmented button:disabled[aria-pressed="true"] { background: var(--border); color: var(--muted); }
 #panel-settings p { margin-top: 8px; }
 
 /* ── history ─────────────────────────────────────────────────────────────── */
@@ -365,6 +380,16 @@ button:active:not(:disabled) { opacity: .8; }
   font-variant-numeric: tabular-nums;
 }
 .run .when { color: var(--muted); }
+.run .tag {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-left: 4px;
+  border-radius: 5px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
 .run .d { color: var(--down); font-weight: 600; }
 .run .u { color: var(--up); font-weight: 600; }
 .run .g { font-weight: 700; color: var(--muted); }
@@ -378,7 +403,7 @@ button:active:not(:disabled) { opacity: .8; }
 #app[data-layout="host"] { max-width: 1120px; padding: 24px 28px 40px; gap: 20px; }
 [data-layout="host"] .brand h1 { font-size: 20px; }
 [data-layout="host"] #chart { height: 320px; }
-[data-layout="host"] .cards { grid-template-columns: repeat(4, 1fr); }
+[data-layout="host"] .cards { grid-template-columns: repeat(3, 1fr); }
 [data-layout="host"] .metric-value { font-size: 40px; }
 [data-layout="host"] .metric.latency .metric-value { font-size: 28px; }
 [data-layout="host"] .verdict { font-size: 19px; }

@@ -281,7 +281,7 @@ func TestBuildVerdict(t *testing.T) {
 		Trustworthy: true,
 	}
 
-	v := BuildVerdict(down, up, bb, false)
+	v := BuildVerdict(down, up, bb, DirectionBoth, false)
 	for _, want := range []string{"480 Mbps", "310 Mbps", "3.0 ms", "45 ms", "bufferbloat moderat"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("verdict %q missing %q", v, want)
@@ -290,14 +290,14 @@ func TestBuildVerdict(t *testing.T) {
 }
 
 func TestBuildVerdictAborted(t *testing.T) {
-	v := BuildVerdict(DirStats{Samples: 5}, DirStats{Samples: 5}, Bufferbloat{Grade: "A", Trustworthy: true}, true)
+	v := BuildVerdict(DirStats{Samples: 5}, DirStats{Samples: 5}, Bufferbloat{Grade: "A", Trustworthy: true}, DirectionBoth, true)
 	if !strings.Contains(v, "întreruptă") {
 		t.Errorf("aborted run must say so, got %q", v)
 	}
 }
 
 func TestBuildVerdictNoData(t *testing.T) {
-	v := BuildVerdict(DirStats{}, DirStats{}, Bufferbloat{Grade: "?"}, false)
+	v := BuildVerdict(DirStats{}, DirStats{}, Bufferbloat{Grade: "?"}, DirectionBoth, false)
 	if !strings.Contains(v, "Nicio măsurătoare") {
 		t.Errorf("expected no-data verdict, got %q", v)
 	}
@@ -379,8 +379,7 @@ func TestBufferbloatFlagsBrowserSchedulingDelay(t *testing.T) {
 
 	verdict := BuildVerdict(
 		DirStats{Samples: 8, P50Mbps: 50},
-		DirStats{Samples: 8, P50Mbps: 20},
-		bb, false)
+		DirStats{Samples: 8, P50Mbps: 20}, bb, DirectionBoth, false)
 	if strings.Contains(verdict, "bufferbloat") {
 		t.Errorf("an untrustworthy run must not be graded as bufferbloat: %q", verdict)
 	}
@@ -402,7 +401,7 @@ func TestBufferbloatTrustedWhenSchedulingIsClean(t *testing.T) {
 	if bb.Grade != "C" {
 		t.Errorf("grade: got %q, want C", bb.Grade)
 	}
-	if !strings.Contains(BuildVerdict(DirStats{Samples: 8, P50Mbps: 480}, DirStats{Samples: 8, P50Mbps: 310}, bb, false), "bufferbloat moderat") {
+	if !strings.Contains(BuildVerdict(DirStats{Samples: 8, P50Mbps: 480}, DirStats{Samples: 8, P50Mbps: 310}, bb, DirectionBoth, false), "bufferbloat moderat") {
 		t.Error("a clean run should still be graded normally")
 	}
 }
@@ -461,8 +460,7 @@ func TestBufferbloatFlagsUnansweredPings(t *testing.T) {
 
 	verdict := BuildVerdict(
 		DirStats{Samples: 8, P50Mbps: 3480},
-		DirStats{Samples: 8, P50Mbps: 2602},
-		bb, false)
+		DirStats{Samples: 8, P50Mbps: 2602}, bb, DirectionBoth, false)
 	if strings.Contains(verdict, "bufferbloat") {
 		t.Errorf("must not grade this as bufferbloat: %q", verdict)
 	}
@@ -512,8 +510,7 @@ func TestBufferbloatRejectsPhysicallyImpossibleBuffering(t *testing.T) {
 
 	verdict := BuildVerdict(
 		DirStats{Samples: 42, P50Mbps: 4049},
-		DirStats{Samples: 50, P50Mbps: 2368},
-		bb, false)
+		DirStats{Samples: 50, P50Mbps: 2368}, bb, DirectionBoth, false)
 	if strings.Contains(verdict, "bufferbloat") {
 		t.Errorf("must not be graded as bufferbloat: %q", verdict)
 	}
@@ -548,13 +545,54 @@ func TestFormatBytes(t *testing.T) {
 		want string
 	}{
 		{512, "512 B"},
-		{2048, "2 kB"},
-		{5 << 20, "5 MB"},
-		{5528975667, "5.1 GB"},
+		{2048, "2 KiB"},
+		{65536, "64 KiB"},
+		{5 << 20, "5 MiB"},
+		{5528975667, "5.1 GiB"},
 	}
 	for _, tc := range tests {
 		if got := FormatBytes(tc.in); got != tc.want {
 			t.Errorf("FormatBytes(%d) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// Regression: an ordinary healthy run must not be invalidated by a few
+// milliseconds of browser timer drift. Grade B says the link is fine under
+// load, and that stays true whether or not 5 ms of the 10 ms increase was the
+// measuring device.
+func TestBufferbloatDoesNotGateGoodGrades(t *testing.T) {
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 0.6},
+		LoadedDownload: LatencyStats{Count: 100, Sent: 100, P95Ms: 11},
+		LoadedUpload:   LatencyStats{Count: 100, Sent: 100, P95Ms: 9},
+		Scheduling:     LatencyStats{Count: 200, P95Ms: 5.4},
+	}, 774)
+
+	if !bb.Trustworthy {
+		t.Errorf("a grade-B run must not be thrown out over timer drift: %+v", bb)
+	}
+	if bb.Grade != "B" {
+		t.Errorf("grade: got %q, want B", bb.Grade)
+	}
+	verdict := BuildVerdict(
+		DirStats{Samples: 40, P50Mbps: 663},
+		DirStats{Samples: 40, P50Mbps: 774},
+		bb, DirectionBoth, false)
+	if !strings.Contains(verdict, "bufferbloat ușor") {
+		t.Errorf("a healthy run should read normally, got %q", verdict)
+	}
+}
+
+// But the same drift on a grade that *is* an accusation still gates it.
+func TestBufferbloatGatesAlarmingGrades(t *testing.T) {
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 5},
+		LoadedDownload: LatencyStats{Count: 100, Sent: 100, P95Ms: 90},
+		Scheduling:     LatencyStats{Count: 200, P95Ms: 60},
+	}, 50)
+
+	if bb.Trustworthy {
+		t.Errorf("85 ms of increase with 60 ms of stalling must be gated: %+v", bb)
 	}
 }

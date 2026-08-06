@@ -99,6 +99,26 @@ O rulare folosește mai multe conexiuni WebSocket cu același ID de sesiune:
 - **observer** — oricâte, niciodată blocate. Primesc progresul retransmis, ca
   al doilea ecran să deseneze același grafic.
 
+## Moduri de rulare
+
+| | Automat | Manual |
+|---|---------|--------|
+| Durată | 10 s pe direcție | până apeși **Oprește** |
+| Direcție | ambele, sau doar una | o singură direcție |
+| Istoric | comparabil între rulări | comparat doar cu alte rulări manuale de aceeași direcție |
+
+Modul automat e cel calibrat: durată fixă, deci două rulări se pot compara
+direct. Modul manual e pentru când vrei să vezi ce face legătura pe termen lung
+— saturezi Wi-Fi-ul cât ai nevoie, te plimbi prin casă, și oprești când ai văzut
+destul. Graficul acoperă toată rularea, indiferent cât a durat.
+
+Rularea manuală merge într-o singură direcție: „ambele" ar cere două opriri
+separate, ceea ce e un control confuz.
+
+O rulare compară doar cu rulări de aceeași formă — același mod, aceeași
+direcție, aceeași rețea. Un download manual de 4 minute și o rulare automată de
+10 s în ambele sensuri nu măsoară același lucru.
+
 ## Ce măsoară, și cum
 
 | Metrică | Metodă |
@@ -109,6 +129,8 @@ O rulare folosește mai multe conexiuni WebSocket cu același ID de sesiune:
 | Latență sub sarcină | Ping continuu (100 ms) în timpul download-ului și al upload-ului |
 | Bufferbloat | p95 sub sarcină − p50 în repaus, cu notă de la A la F |
 | Verificări de încredere | blocaj al firului principal, ping-uri fără răspuns, tampon implicat imposibil |
+| Viteză min / max | extremele ferestrelor de 250 ms, după eliminarea warmup-ului |
+| Cadre și dimensiune | mesaje WebSocket numărate de capătul care le primește |
 | Pierdere de pachete | **NEMĂSURAT** — TCP ascunde retransmisiile |
 
 Fiecare direcție e numărată de capătul care știe adevărul. La download,
@@ -127,6 +149,18 @@ o prăbușire de throughput care nu a existat.
 Se raportează percentile, niciodată medii goale: o singură fereastră blocată
 strică o medie.
 
+### „Cadre", nu pachete
+
+Se raportează numărul de **mesaje WebSocket** și dimensiunea încărcăturii utile
+a unuia (64 KiB implicit), nu pachete IP. TCP re-segmentează după MTU-ul căii —
+un cadru de 64 KiB devine în jur de 45 de segmente pe o cale obișnuită, iar dacă
+e activ TSO/GSO nici măcar nucleul nu vede aceeași împărțire ca firul. Numărul
+real de pachete de pe fir nu poate fi observat dintr-un browser, așa că nu e
+raportat: ar fi o cifră inventată.
+
+Cadrele de download sunt numărate de client, cele de upload de server — același
+principiu ca la octeți: numără capătul care știe ce a ajuns.
+
 ### Streamuri paralele
 
 Un singur stream TCP rareori saturează Wi-Fi-ul modern. Throughput-ul se agregă
@@ -137,8 +171,11 @@ sesiuni, ceea ce face suma validă.
 
 ### Când o cifră e refuzată
 
-Nota de bufferbloat e dată doar dacă poate fi atribuită rețelei. Trei condiții o
-invalidează, fiecare măsurată separat:
+Nota de bufferbloat e dată doar dacă poate fi atribuită rețelei. Verificările se
+aplică **doar notelor care acuză** (creștere peste 30 ms, adică nota C sau mai
+rea): la A sau B concluzia e „legătura e în regulă sub sarcină", și asta rămâne
+adevărat chiar dacă o parte din milisecunde au venit de la browser. Trei condiții
+invalidează o notă, fiecare măsurată separat:
 
 1. **Firul principal al browserului a fost blocat** — un timer de 100 ms care
    întârzie mult înseamnă că pagina și-a măsurat propria întârziere.

@@ -28,8 +28,14 @@ var MSG = {
   UP_START: 0x06, UP_DATA: 0x07, UP_DONE: 0x08,
   RESULT: 0x09, ABORT: 0x0A,
   HELLO: 0x0B, HELLO_ACK: 0x0C, BUSY: 0x0D,
-  PROGRESS: 0x0E, OBSERVE: 0x0F, FINAL: 0x10, STORED: 0x11
+  PROGRESS: 0x0E, OBSERVE: 0x0F, FINAL: 0x10, STORED: 0x11, STOP: 0x12
 };
+
+var MODE_AUTO = 'auto';
+var MODE_MANUAL = 'manual';
+var DIR_BOTH = 'both';
+var DIR_DOWN = 'download';
+var DIR_UP = 'upload';
 
 var PHASE_MS = 10000;          // per direction
 var IDLE_PINGS = 50;           // idle latency round trips
@@ -72,10 +78,12 @@ function fmtMs(v) {
   if (!isFinite(v)) return '--';
   return v >= 10 ? v.toFixed(0) : v.toFixed(1);
 }
+// Binary divisors with binary labels, matching FormatBytes in stats.go. Frame
+// and buffer sizes are powers of two; rendering 65536 as "66 kB" reads as a bug.
 function fmtBytes(n) {
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + ' kB';
+  if (n >= (1 << 30)) return (n / (1 << 30)).toFixed(2) + ' GiB';
+  if (n >= (1 << 20)) return (n / (1 << 20)).toFixed(1) + ' MiB';
+  if (n >= (1 << 10)) return (n / (1 << 10)).toFixed(0) + ' KiB';
   return n + ' B';
 }
 
@@ -218,6 +226,30 @@ var PHASE_LABELS = {
   upload: 'Upload'
 };
 
+// MAX_PLOT_POINTS bounds how much the chart draws. A manual run can go for
+// minutes, and redrawing tens of thousands of points four times a second on a
+// phone would cost more than the measurement itself. Buckets keep the peak
+// rather than a sample of it, so decimation never hides a spike.
+var MAX_PLOT_POINTS = 900;
+
+function decimate(points, limit) {
+  if (points.length <= limit) return points;
+  var bucket = Math.ceil(points.length / limit);
+  var out = [];
+  for (var i = 0; i < points.length; i += bucket) {
+    var peak = points[i];
+    for (var j = i + 1; j < i + bucket && j < points.length; j++) {
+      if (points[j].v > peak.v) peak = points[j];
+    }
+    out.push(peak);
+  }
+  // Always keep the final point so the line ends where the data does.
+  if (out[out.length - 1] !== points[points.length - 1]) {
+    out.push(points[points.length - 1]);
+  }
+  return out;
+}
+
 // Chart draws throughput and latency on one timeline with two axes. Latency is
 // overlaid rather than shown separately on purpose: the whole point of the tool
 // is watching the latency line climb exactly while the throughput area fills.
@@ -270,7 +302,9 @@ Chart.prototype.addThroughput = function (tMs, mbps) {
 Chart.prototype.addLatency = function (tMs, ms) {
   this.lat.push({ t: tMs, v: ms });
   if (this.phases.length) this.phases[this.phases.length - 1].to = tMs;
-  this.draw();
+  // Latency arrives ~10x more often than throughput samples; redrawing on each
+  // one is wasted work when a throughput sample is about to redraw anyway.
+  if (this.lat.length % 4 === 0) this.draw();
 };
 
 Chart.prototype.maxT = function () {
@@ -324,6 +358,10 @@ Chart.prototype.render = function (ctx, w, h, theme) {
   vMax = niceMax(vMax || 1);
   lMax = niceMax(lMax || 10);
 
+  // Scales come from the full series above; only the drawing is thinned.
+  var tp = decimate(this.tp, MAX_PLOT_POINTS);
+  var lat = decimate(this.lat, MAX_PLOT_POINTS);
+
   var X = function (ms) { return pad.l + (ms / tMax) * pw; };
   var Y = function (v) { return pad.t + ph - (v / vMax) * ph; };
   var L = function (v) { return pad.t + ph - (v / lMax) * ph; };
@@ -356,18 +394,18 @@ Chart.prototype.render = function (ctx, w, h, theme) {
   }
 
   // Throughput: filled area plus line.
-  if (this.tp.length) {
+  if (tp.length) {
     ctx.beginPath();
-    ctx.moveTo(X(this.tp[0].t), Y(0));
-    for (i = 0; i < this.tp.length; i++) ctx.lineTo(X(this.tp[i].t), Y(this.tp[i].v));
-    ctx.lineTo(X(this.tp[this.tp.length - 1].t), Y(0));
+    ctx.moveTo(X(tp[0].t), Y(0));
+    for (i = 0; i < tp.length; i++) ctx.lineTo(X(tp[i].t), Y(tp[i].v));
+    ctx.lineTo(X(tp[tp.length - 1].t), Y(0));
     ctx.closePath();
     ctx.fillStyle = hexToRGBA(t.down, 0.16);
     ctx.fill();
 
     ctx.beginPath();
-    for (i = 0; i < this.tp.length; i++) {
-      var xx = X(this.tp[i].t), yy = Y(this.tp[i].v);
+    for (i = 0; i < tp.length; i++) {
+      var xx = X(tp[i].t), yy = Y(tp[i].v);
       if (i === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
     }
     ctx.strokeStyle = t.down;
@@ -377,10 +415,10 @@ Chart.prototype.render = function (ctx, w, h, theme) {
   }
 
   // Latency line on the right axis.
-  if (this.lat.length) {
+  if (lat.length) {
     ctx.beginPath();
-    for (i = 0; i < this.lat.length; i++) {
-      var lx = X(this.lat[i].t), ly = L(this.lat[i].v);
+    for (i = 0; i < lat.length; i++) {
+      var lx = X(lat[i].t), ly = L(lat[i].v);
       if (i === 0) ctx.moveTo(lx, ly); else ctx.lineTo(lx, ly);
     }
     ctx.strokeStyle = t.lat;
@@ -399,8 +437,13 @@ Chart.prototype.render = function (ctx, w, h, theme) {
     ctx.fillText(axisLabel(lMax * (4 - i) / 4), pad.l + pw + 6, gy2 + 3);
   }
   ctx.textAlign = 'center';
+  var longRun = tMax > 120000;
   for (i = 0; i <= 4; i++) {
-    ctx.fillText((tMax * i / 4 / 1000).toFixed(0) + 's', pad.l + (pw / 4) * i, h - pad.b + 15);
+    var at = tMax * i / 4;
+    var label = longRun
+      ? Math.round(at / 60000) + 'm'
+      : (at / 1000).toFixed(0) + 's';
+    ctx.fillText(label, pad.l + (pw / 4) * i, h - pad.b + 15);
   }
 
   ctx.textAlign = 'left';
@@ -437,11 +480,20 @@ var observer = null;
 var observerPing = null;
 var reconnectTimer = null;
 var lastStored = null;
-var settings = { streams: CFG.defaultStreams || 4 };
+var settings = {
+  streams: CFG.defaultStreams || 4,
+  mode: MODE_AUTO,
+  direction: DIR_BOTH
+};
 
-function newRun(streams) {
+function newRun(streams, mode, direction) {
   return {
     streams: streams,
+    mode: mode,
+    direction: direction,
+    manual: mode === MODE_MANUAL,
+    stopping: false,
+    elapsedTimer: null,
     sessionId: randomId(),
     control: null,
     streamConns: [],
@@ -457,7 +509,7 @@ function newRun(streams) {
     rtt: { idle: [], download: [], upload: [] },
     lag: [],
     lastRTT: NaN,
-    down: { start: 0, total: 0, windows: new Map(), serverBytes: 0 },
+    down: { start: 0, total: 0, frames: 0, windows: new Map(), serverBytes: 0 },
     up: { start: 0, sent: 0 },
     pinger: null,
     sampler: null,
@@ -610,6 +662,7 @@ async function runDownload() {
   var d = run.down;
   d.start = performance.now();
   d.total = 0;
+  d.frames = 0;
   d.windows = new Map();
   d.serverBytes = 0;
 
@@ -618,7 +671,11 @@ async function runDownload() {
   });
 
   run.streamConns.forEach(function (c) {
-    sendJSON(c, MSG.DOWN_START, { durationMs: PHASE_MS, chunkBytes: CHUNK });
+    sendJSON(c, MSG.DOWN_START, {
+      durationMs: PHASE_MS,
+      chunkBytes: CHUNK,
+      manual: run.manual
+    });
   });
 
   startPinger();
@@ -633,8 +690,8 @@ async function runDownload() {
     var elapsed = now - d.start;
     text('live-mbps', fmtMbps(mbps));
     if (chart) chart.addThroughput(now - run.startedAt, mbps);
-    setProgress(elapsed / PHASE_MS);
-    relayProgress('download', now - run.startedAt, mbps, elapsed / PHASE_MS);
+    setProgress(run.manual ? 0 : elapsed / PHASE_MS);
+    relayProgress('download', now - run.startedAt, mbps, run.manual ? 0 : elapsed / PHASE_MS);
   }, SAMPLE_MS);
 
   var results = await Promise.all(waits);
@@ -671,10 +728,12 @@ async function runUpload() {
   u.sent = 0;
 
   var resultPromise = new Promise(function (resolve) { run.onResult = resolve; });
-  var deadline = u.start + PHASE_MS;
+  // A manual run has no deadline; it ends when the operator presses stop, which
+  // pump() notices through run.stopping.
+  var deadline = run.manual ? Infinity : u.start + PHASE_MS;
 
   run.streamConns.forEach(function (c) {
-    sendJSON(c, MSG.UP_START, { durationMs: PHASE_MS });
+    sendJSON(c, MSG.UP_START, { durationMs: PHASE_MS, manual: run.manual });
     c.upBuf = makeUploadBuffer();
     c.upFinished = false;
     pump(c, deadline);
@@ -696,11 +755,16 @@ async function runUpload() {
     var elapsed = now - u.start;
     text('live-mbps', fmtMbps(Math.max(0, mbps)));
     if (chart) chart.addThroughput(now - run.startedAt, Math.max(0, mbps));
-    setProgress(elapsed / PHASE_MS);
-    relayProgress('upload', now - run.startedAt, Math.max(0, mbps), elapsed / PHASE_MS);
+    setProgress(run.manual ? 0 : elapsed / PHASE_MS);
+    relayProgress('upload', now - run.startedAt, Math.max(0, mbps), run.manual ? 0 : elapsed / PHASE_MS);
   }, SAMPLE_MS);
 
-  var result = await withTimeout(resultPromise, PHASE_MS + 20000, 'Serverul nu a trimis rezultatul de upload.');
+  // A manual upload can run for as long as the operator leaves it, so the wait
+  // for the server's aggregate is bounded from the moment it was asked to stop,
+  // not from the moment the phase began.
+  var result = run.manual
+    ? await resultPromise
+    : await withTimeout(resultPromise, PHASE_MS + 20000, 'Serverul nu a trimis rezultatul de upload.');
   stopSampler();
   stopPinger();
   return result;
@@ -724,7 +788,7 @@ function pump(conn, deadline) {
   var ws = conn.ws;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-  if (performance.now() >= deadline) {
+  if (run.stopping || performance.now() >= deadline) {
     if (!conn.upFinished) {
       conn.upFinished = true;
       sendRaw(conn, MSG.UP_DONE, null);
@@ -782,7 +846,8 @@ async function startTest() {
   stopObserving();
   observedPhase = '';
   observedPeer = '';
-  run = newRun(settings.streams);
+  run = newRun(settings.streams, settings.mode, settings.direction);
+  setRunControls(true);
   setState('running');
   setDot('busy');
   chart.reset();
@@ -816,15 +881,22 @@ async function startTest() {
     }
 
     run.startedAt = performance.now();
+    startElapsedClock();
 
+    // The idle latency probe runs in every mode: without a baseline there is
+    // nothing to compare the loaded latency against.
     await runIdleLatency();
     if (run.aborted) throw new Error(run.abortReason);
 
-    await runDownload();
-    if (run.aborted) throw new Error(run.abortReason);
+    if (run.direction !== DIR_UP) {
+      await runDownload();
+      if (run.aborted) throw new Error(run.abortReason);
+    }
 
-    await runUpload();
-    if (run.aborted) throw new Error(run.abortReason);
+    if (run.direction !== DIR_DOWN) {
+      await runUpload();
+      if (run.aborted) throw new Error(run.abortReason);
+    }
 
     setPhase('done', '');
     setProgress(1);
@@ -838,8 +910,59 @@ async function startTest() {
     handleRunError(err);
   } finally {
     teardownRun();
+    setRunControls(false);
     startObserving();
   }
+}
+
+// stopTest ends a manual run. The download stops server-side (its send loop
+// polls the stop flag between frames) and the upload stops client-side (pump
+// sees run.stopping and sends UP_DONE). Either way the phase unwinds through
+// its normal completion path, so the result is a finished run rather than an
+// aborted one.
+function stopTest() {
+  if (!run || run.stopping) return;
+  run.stopping = true;
+  sendRaw(run.control, MSG.STOP, null);
+  text('phase-sub', 'Se oprește…');
+  var stop = $('btn-stop');
+  stop.disabled = true;
+  stop.textContent = 'Se oprește…';
+}
+
+// setRunControls reveals the stop button for the duration of a manual run. It
+// lives inside the live panel, which is the only panel on screen while a test
+// is going.
+function setRunControls(running) {
+  var manual = running && run && run.manual;
+  app.setAttribute('data-running', manual ? 'manual' : (running ? 'auto' : 'no'));
+  var stop = $('btn-stop');
+  stop.disabled = false;
+  stop.textContent = 'Oprește testul';
+}
+
+function formatElapsed(ms) {
+  var total = Math.floor(ms / 1000);
+  var m = Math.floor(total / 60), sec = total % 60;
+  return m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+// startElapsedClock shows how long a manual run has been going, since there is
+// no progress bar to fill when the end is up to the operator.
+function startElapsedClock() {
+  stopElapsedClock();
+  if (!run || !run.manual) return;
+  run.elapsedTimer = setInterval(function () {
+    if (!run || run.stopping) return;
+    if (run.phase === 'download' || run.phase === 'upload') {
+      text('phase-sub', 'Rulează de ' + formatElapsed(performance.now() - run.startedAt) +
+        ' — apasă Oprește când vrei să se termine');
+    }
+  }, 500);
+}
+
+function stopElapsedClock() {
+  if (run && run.elapsedTimer) { clearInterval(run.elapsedTimer); run.elapsedTimer = null; }
 }
 
 function bindStream(conn) {
@@ -847,6 +970,7 @@ function bindStream(conn) {
     if (!run) return;
     var d = run.down;
     d.total += payload.length;
+    d.frames += 1;
     var w = Math.floor((performance.now() - d.start) / SAMPLE_MS);
     d.windows.set(w, (d.windows.get(w) || 0) + payload.length);
   });
@@ -867,6 +991,10 @@ function sendFinal() {
   var storedPromise = new Promise(function (resolve) { run.onStored = resolve; });
   sendJSON(run.control, MSG.FINAL, {
     streams: run.streams,
+    mode: run.mode,
+    direction: run.direction,
+    chunkBytes: CHUNK,
+    downloadFrames: run.down.frames,
     durationMs: Math.round(performance.now() - run.startedAt),
     downloadSamples: buildDownloadSamples(run.down.windows),
     downloadTotalBytes: run.down.total,
@@ -918,6 +1046,7 @@ function teardownRun() {
   if (!run) return;
   stopSampler();
   stopPinger();
+  stopElapsedClock();
   run.streamConns.forEach(closeConn);
   closeConn(run.control);
   run = null;
@@ -945,9 +1074,25 @@ function renderResult(stored) {
   grade.title = trusted ? bb.label || '' : 'Latența sub sarcină nu a putut fi atribuită rețelei';
 
   text('r-down-p50', fmtMbps(r.download.p50_mbps));
-  text('r-down-p95', fmtMbps(r.download.p95_mbps) + ' Mbps');
+  text('r-down-min', fmtMbps(r.download.min_mbps));
+  text('r-down-max', fmtMbps(r.download.max_mbps) + ' Mbps');
   text('r-up-p50', fmtMbps(r.upload.p50_mbps));
-  text('r-up-p95', fmtMbps(r.upload.p95_mbps) + ' Mbps');
+  text('r-up-min', fmtMbps(r.upload.min_mbps));
+  text('r-up-max', fmtMbps(r.upload.max_mbps) + ' Mbps');
+
+  // A run that only went one way must not show an empty card for the direction
+  // it never measured.
+  var dir = r.direction || DIR_BOTH;
+  show($('down-card-wrap'), dir !== DIR_UP);
+  show($('up-card-wrap'), dir !== DIR_DOWN);
+
+  var frames = r.frames || {};
+  var totalFrames = (frames.download_count || 0) + (frames.upload_count || 0);
+  text('r-frames', fmtCount(totalFrames));
+  text('r-frame-size', fmtBytes(frames.frame_bytes || 0) + ' fiecare · ' +
+    fmtBytes((frames.download_bytes || 0) + (frames.upload_bytes || 0)) + ' total');
+  text('r-duration', formatElapsed(r.duration_ms || 0));
+  text('r-mode', (r.mode === MODE_MANUAL ? 'manual' : '10 s fix') + ' · ' + directionLabel(dir));
   text('r-lat-idle', fmtMs(r.latency.idle.p50_ms));
   text('r-lat-jitter', fmtMs(r.latency.idle.jitter_ms) + ' ms');
   text('r-lat-loaded', fmtMs(bb.loaded_p95_ms));
@@ -1004,6 +1149,12 @@ function renderAdvanced(r) {
     ' ms (' + r.latency.loaded_download.count + '/' + r.latency.loaded_download.sent + ' răspunsuri)');
   text('a-lat-up', fmtMs(r.latency.loaded_upload.p50_ms) + ' / ' + fmtMs(r.latency.loaded_upload.p95_ms) +
     ' ms (' + r.latency.loaded_upload.count + '/' + r.latency.loaded_upload.sent + ' răspunsuri)');
+  text('a-mode', (r.mode === MODE_MANUAL ? 'manual, până la Stop' : 'automat, 10 s pe direcție') +
+    ' · ' + directionLabel(r.direction || DIR_BOTH));
+  text('a-frames', fmtCount((r.frames && r.frames.download_count) || 0) + ' / ' +
+    fmtCount((r.frames && r.frames.upload_count) || 0) + ' cadre WebSocket');
+  text('a-framesize', fmtBytes((r.frames && r.frames.frame_bytes) || 0) +
+    ' încărcătură utilă per cadru (mesaje, nu pachete IP)');
   text('a-bloat', 'nota ' + r.bufferbloat.grade + ' — ' + r.bufferbloat.label + ' (+' + fmtMs(r.bufferbloat.delta_ms) + ' ms)' +
     (r.bufferbloat.trustworthy ? '' : ' — NECREDIBIL, vezi mai jos'));
   text('a-buffer', r.bufferbloat.implied_buffer_bytes
@@ -1020,6 +1171,16 @@ function renderAdvanced(r) {
   text('a-net', (r.ssid ? r.ssid + ' · ' : '') + (r.subnet || '–'));
   text('a-client', r.client + (r.client_addr ? ' (' + r.client_addr + ')' : ''));
   text('a-time', new Date(r.timestamp).toLocaleString('ro-RO'));
+}
+
+function directionLabel(dir) {
+  if (dir === DIR_DOWN) return 'doar download';
+  if (dir === DIR_UP) return 'doar upload';
+  return 'download și upload';
+}
+
+function fmtCount(n) {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
 }
 
 function escapeHTML(s) {
@@ -1199,11 +1360,21 @@ function renderHistory(runs, network) {
   var html = '';
   for (var i = 0; i < Math.min(here.length, 8); i++) {
     var r = here[i];
-    html += '<div class="run' + (r.aborted ? ' aborted' : '') + '">' +
-      '<span class="when">' + escapeHTML(new Date(r.timestamp).toLocaleString('ro-RO')) + '</span>' +
-      '<span class="d">' + fmtMbps(r.download.p50_mbps) + '↓</span>' +
-      '<span class="u">' + fmtMbps(r.upload.p50_mbps) + '↑</span>' +
-      '<span class="g">' + escapeHTML((r.bufferbloat && r.bufferbloat.grade) || '–') + '</span>' +
+    // A direction that was never measured shows a dash, not a zero: "0.00↑"
+    // reads as "your upload is broken" rather than "we did not test it".
+    var dir = r.direction || DIR_BOTH;
+    var down = dir === DIR_UP ? '–' : fmtMbps(r.download.p50_mbps);
+    var up = dir === DIR_DOWN ? '–' : fmtMbps(r.upload.p50_mbps);
+    var grade = (r.bufferbloat && r.bufferbloat.trustworthy === false)
+      ? '?'
+      : ((r.bufferbloat && r.bufferbloat.grade) || '–');
+    html += '<div class="run' + (r.aborted ? ' aborted' : '') + '"' +
+      ' title="' + escapeHTML((r.mode === MODE_MANUAL ? 'manual' : '10 s fix') + ' · ' + directionLabel(dir)) + '">' +
+      '<span class="when">' + escapeHTML(new Date(r.timestamp).toLocaleString('ro-RO')) +
+      (r.mode === MODE_MANUAL ? ' <span class="tag">manual</span>' : '') + '</span>' +
+      '<span class="d">' + down + '↓</span>' +
+      '<span class="u">' + up + '↑</span>' +
+      '<span class="g">' + escapeHTML(grade) + '</span>' +
       '</div>';
   }
   el.innerHTML = html;
@@ -1365,12 +1536,48 @@ function applyLayout(l) {
 
 function applyStreams(n) {
   settings.streams = n;
-  try { localStorage.setItem('lantest.streams', String(n)); } catch (e) {}
-  var buttons = $('streams').querySelectorAll('button');
+  store('lantest.streams', String(n));
+  pressOne('streams', 'data-streams', String(n));
+}
+
+function applyMode(mode) {
+  settings.mode = mode === MODE_MANUAL ? MODE_MANUAL : MODE_AUTO;
+  store('lantest.mode', settings.mode);
+  pressOne('mode', 'data-mode', settings.mode);
+
+  // "Both directions" needs two stops to end, which is a confusing control.
+  // A manual run is therefore single-direction; pick one if none was chosen.
+  var bothBtn = $('direction').querySelector('button[data-direction="both"]');
+  var manual = settings.mode === MODE_MANUAL;
+  bothBtn.disabled = manual;
+  bothBtn.title = manual ? 'O rulare manuală merge într-o singură direcție' : '';
+  if (manual && settings.direction === DIR_BOTH) applyDirection(DIR_DOWN);
+
+  text('settings-hint', manual
+    ? 'Rularea manuală merge într-o singură direcție, până apeși Oprește. Nu se compară cu rulările de 10 s.'
+    : 'Un singur stream TCP rareori saturează Wi-Fi-ul modern. Rulările de 10 s sunt cele comparabile în istoric.');
+}
+
+function applyDirection(dir) {
+  settings.direction = dir;
+  store('lantest.direction', dir);
+  pressOne('direction', 'data-direction', dir);
+}
+
+function pressOne(groupId, attr, value) {
+  var buttons = $(groupId).querySelectorAll('button');
   for (var i = 0; i < buttons.length; i++) {
-    var v = parseInt(buttons[i].getAttribute('data-streams'), 10);
-    buttons[i].setAttribute('aria-pressed', v === n ? 'true' : 'false');
+    buttons[i].setAttribute('aria-pressed',
+      buttons[i].getAttribute(attr) === value ? 'true' : 'false');
   }
+}
+
+function store(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) {}
+}
+
+function load(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
 }
 
 async function loadURLs() {
@@ -1406,10 +1613,10 @@ function init() {
   chart = new Chart($('chart'));
 
   applyLayout(preferredLayout());
-  var savedStreams = parseInt((function () {
-    try { return localStorage.getItem('lantest.streams'); } catch (e) { return null; }
-  })(), 10);
+  var savedStreams = parseInt(load('lantest.streams'), 10);
   applyStreams(savedStreams > 0 && savedStreams <= MAX_STREAMS ? savedStreams : (CFG.defaultStreams || 4));
+  applyDirection(load('lantest.direction') || DIR_BOTH);
+  applyMode(load('lantest.mode') || MODE_AUTO);
 
   var net = (CFG.network || {});
   text('net-label', net.ssid || net.subnet || '');
@@ -1425,8 +1632,19 @@ function init() {
     if (b) applyStreams(parseInt(b.getAttribute('data-streams'), 10));
   });
 
+  $('direction').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-direction]');
+    if (b && !b.disabled) applyDirection(b.getAttribute('data-direction'));
+  });
+
+  $('mode').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-mode]');
+    if (b) applyMode(b.getAttribute('data-mode'));
+  });
+
   $('btn-start').addEventListener('click', startTest);
   $('btn-start-local').addEventListener('click', startTest);
+  $('btn-stop').addEventListener('click', stopTest);
   $('btn-again').addEventListener('click', function () {
     setState('waiting');
     banner(null);

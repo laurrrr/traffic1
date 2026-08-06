@@ -631,3 +631,206 @@ func TestHistoryEndpointRejectsWrites(t *testing.T) {
 		t.Errorf("history must be read-only over HTTP, got %s", resp.Status)
 	}
 }
+
+// ── manual mode ──────────────────────────────────────────────────────────────
+
+// A manual run has no length: the server streams until the operator says stop.
+// The stop travels on the control connection, so it arrives even while the
+// stream connections are saturated with test data.
+func TestManualDownloadRunsUntilStopped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("moves real bytes")
+	}
+	rig := newTestRig(t)
+	const sid = "manual1"
+
+	control := handshake(t, rig.wsURL, Hello{SessionID: sid, Role: RoleControl, Streams: 1})
+	expectMsg(t, control, MsgHelloAck)
+
+	stream := handshake(t, rig.wsURL, Hello{SessionID: sid, Role: RoleStream, Index: 0})
+	expectMsg(t, stream, MsgHelloAck)
+
+	// DurationMs is deliberately tiny: in manual mode it must be ignored, so a
+	// run that respected it would end almost immediately and fail the timing
+	// check below.
+	sendJSONMsg(t, stream, MsgDownStart, DownStartCfg{
+		DurationMs: 200, ChunkBytes: 16 * 1024, Manual: true,
+	})
+
+	const holdFor = 2 * time.Second
+	started := time.Now()
+
+	// Drain frames until the stop takes effect, sending STOP once the hold time
+	// has elapsed.
+	stopSent := false
+	var frames int64
+	var done DownDoneMsg
+	for {
+		typ, payload := readMsg(t, stream)
+		if typ == MsgDownData {
+			frames++
+			if !stopSent && time.Since(started) >= holdFor {
+				stopSent = true
+				sendMsg(t, control, MsgStop, nil)
+			}
+			continue
+		}
+		if typ == MsgDownDone {
+			if err := json.Unmarshal(payload, &done); err != nil {
+				t.Fatalf("unmarshal down done: %v", err)
+			}
+			break
+		}
+		t.Fatalf("unexpected message 0x%02x", typ)
+	}
+	elapsed := time.Since(started)
+
+	if !stopSent {
+		t.Fatal("stream ended before the stop was ever sent")
+	}
+	if elapsed < holdFor {
+		t.Errorf("manual run honoured DurationMs instead of running until stopped: %v", elapsed)
+	}
+	if elapsed > holdFor+5*time.Second {
+		t.Errorf("stop took too long to take effect: %v", elapsed)
+	}
+	if done.Frames != frames {
+		t.Errorf("server counted %d frames, client received %d", done.Frames, frames)
+	}
+	if done.FrameBytes != 16*1024 {
+		t.Errorf("frame size: got %d, want %d", done.FrameBytes, 16*1024)
+	}
+	if done.TotalBytes != done.Frames*int64(done.FrameBytes) {
+		t.Errorf("byte count %d is inconsistent with %d frames of %d",
+			done.TotalBytes, done.Frames, done.FrameBytes)
+	}
+}
+
+// A manual upload ends when the client stops sending and says so; the server
+// must not cut it off at the nominal duration in the meantime.
+func TestManualUploadRunsUntilClientStops(t *testing.T) {
+	if testing.Short() {
+		t.Skip("moves real bytes")
+	}
+	rig := newTestRig(t)
+	const sid = "manual2"
+
+	control := handshake(t, rig.wsURL, Hello{SessionID: sid, Role: RoleControl, Streams: 1})
+	expectMsg(t, control, MsgHelloAck)
+	stream := handshake(t, rig.wsURL, Hello{SessionID: sid, Role: RoleStream, Index: 0})
+	expectMsg(t, stream, MsgHelloAck)
+
+	sendJSONMsg(t, stream, MsgUpStart, UpStartCfg{DurationMs: 200, Manual: true})
+
+	chunk := make([]byte, 16*1024)
+	stop := time.Now().Add(2500 * time.Millisecond)
+	var sent int64
+	for time.Now().Before(stop) {
+		sendMsg(t, stream, MsgUpData, chunk)
+		sent++
+		time.Sleep(2 * time.Millisecond)
+	}
+	sendMsg(t, stream, MsgUpDone, nil)
+
+	var result UpResultMsg
+	if err := json.Unmarshal(expectMsg(t, control, MsgResult), &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.Frames != sent {
+		t.Errorf("server counted %d frames, client sent %d", result.Frames, sent)
+	}
+	if result.ElapsedMs < 2000 {
+		t.Errorf("manual upload was cut short at %d ms", result.ElapsedMs)
+	}
+	if len(result.Samples) == 0 {
+		t.Error("a 2.5 s manual upload should survive the warmup trim")
+	}
+}
+
+// The stored run has to say what shape it was, and a manual single-direction
+// run must never be compared against a fixed-length two-way one.
+func TestManualRunIsRecordedAndNotComparedAcrossShapes(t *testing.T) {
+	rig := newTestRig(t)
+
+	final := FinalMsg{
+		Streams:    4,
+		Mode:       ModeManual,
+		Direction:  DirectionDownload,
+		ChunkBytes: 64 * 1024,
+		DurationMs: 47000,
+		DownloadSamples: []Sample{
+			{Window: 4, AtMs: 1250, Bytes: 15_000_000, Mbps: Mbps(15_000_000, SampleWindow)},
+			{Window: 5, AtMs: 1500, Bytes: 15_000_000, Mbps: Mbps(15_000_000, SampleWindow)},
+			{Window: 6, AtMs: 1750, Bytes: 15_000_000, Mbps: Mbps(15_000_000, SampleWindow)},
+		},
+		DownloadTotalBytes: 900_000_000,
+		DownloadFrames:     13733,
+		RTTIdle:            []float64{1, 1, 1},
+		RTTDownload:        []float64{4, 5, 6},
+		Reliable:           true,
+		UA:                 "Mozilla/5.0 (X11; Linux x86_64) Firefox/121.0",
+	}
+
+	// First manual download run.
+	c1 := handshake(t, rig.wsURL, Hello{SessionID: "m1", Role: RoleControl})
+	expectMsg(t, c1, MsgHelloAck)
+	sendJSONMsg(t, c1, MsgFinal, final)
+	var first StoredMsg
+	if err := json.Unmarshal(expectMsg(t, c1, MsgStored), &first); err != nil {
+		t.Fatalf("unmarshal stored: %v", err)
+	}
+	_ = c1.Close()
+
+	if first.Run.Mode != ModeManual || first.Run.Direction != DirectionDownload {
+		t.Errorf("run shape not recorded: mode=%q direction=%q", first.Run.Mode, first.Run.Direction)
+	}
+	if first.Run.Frames.DownloadCount != 13733 || first.Run.Frames.FrameBytes != 64*1024 {
+		t.Errorf("frame stats not recorded: %+v", first.Run.Frames)
+	}
+	if strings.Contains(first.Run.Verdict, "upload") {
+		t.Errorf("a download-only run must not claim an upload figure: %q", first.Run.Verdict)
+	}
+
+	// An auto both-directions run on the same network must not be offered as
+	// the comparison baseline for the next manual one.
+	waitForIdle(t, rig)
+	c2 := handshake(t, rig.wsURL, Hello{SessionID: "m2", Role: RoleControl})
+	expectMsg(t, c2, MsgHelloAck)
+	auto := final
+	auto.Mode = ModeAuto
+	auto.Direction = DirectionBoth
+	sendJSONMsg(t, c2, MsgFinal, auto)
+	expectMsg(t, c2, MsgStored)
+	_ = c2.Close()
+
+	waitForIdle(t, rig)
+	c3 := handshake(t, rig.wsURL, Hello{SessionID: "m3", Role: RoleControl})
+	expectMsg(t, c3, MsgHelloAck)
+	sendJSONMsg(t, c3, MsgFinal, final)
+	var third StoredMsg
+	if err := json.Unmarshal(expectMsg(t, c3, MsgStored), &third); err != nil {
+		t.Fatalf("unmarshal stored: %v", err)
+	}
+	if third.Previous == nil {
+		t.Fatal("expected the earlier manual download run as the baseline")
+	}
+	if third.Previous.ID != first.Run.ID {
+		t.Errorf("compared against the wrong run: got %q, want %q", third.Previous.ID, first.Run.ID)
+	}
+	if third.Previous.Mode != ModeManual || third.Previous.Direction != DirectionDownload {
+		t.Errorf("baseline has the wrong shape: %+v", third.Previous)
+	}
+}
+
+// waitForIdle blocks until the single-test lock is free again.
+func waitForIdle(t *testing.T, rig *testRig) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if rig.srv.currentPeer() == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("test lock was never released")
+}

@@ -49,6 +49,15 @@ const (
 
 	maxStreams = 8
 
+	// maxManualDuration caps a run that has no fixed length. The operator ends a
+	// manual run by pressing stop; this only exists so a client that vanishes
+	// without saying so cannot pin a sending goroutine forever.
+	maxManualDuration = 60 * time.Minute
+
+	// manualIdleTimeout is how long a manual upload may go without a frame
+	// before the server assumes the client is gone.
+	manualIdleTimeout = 30 * time.Second
+
 	// downloadDeltaTolerance is how far the server's byte count may drift from
 	// the client's before the run is flagged. The client is authoritative.
 	downloadDeltaTolerance = 5.0
@@ -115,17 +124,33 @@ type Session struct {
 	upActive  int
 	upSamples map[int][]Sample
 	upTotal   int64
+	upFrames  int64
 	upFinal   bool
 	upStats   DirStats
+	stopped   bool
+}
+
+// requestStop ends a manual run. The sending loop polls this between frames, so
+// a stop takes effect within one frame rather than waiting out a deadline.
+func (sess *Session) requestStop() {
+	sess.mu.Lock()
+	sess.stopped = true
+	sess.mu.Unlock()
+}
+
+func (sess *Session) stopRequested() bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.stopped
 }
 
 // uploadResult returns the upload figures the server measured for this session.
 // They are read from here rather than from the client's FINAL message: the
 // receiving end is the only one that knows what actually arrived.
-func (sess *Session) uploadResult() (DirStats, int64) {
+func (sess *Session) uploadResult() (DirStats, int64, int64) {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	return sess.upStats, sess.upTotal
+	return sess.upStats, sess.upTotal, sess.upFrames
 }
 
 // Server owns the single-test lock, the observer set and the persisted history.
@@ -404,6 +429,10 @@ func (s *Server) serveControl(c *wsConn, hello Hello, r *http.Request) {
 			}
 		case MsgFinal:
 			s.handleFinal(sess, c, msg[1:])
+		case MsgStop:
+			// Manual run: the operator pressed stop. The load loops poll this.
+			sess.requestStop()
+			log.Printf("session %s: stop requested", sess.ID)
 		case MsgAbort:
 			log.Printf("session %s aborted by client", sess.ID)
 			return
@@ -445,7 +474,7 @@ func (s *Server) serveStream(c *wsConn, hello Hello) {
 			if json.Unmarshal(msg[1:], &cfg) != nil {
 				continue
 			}
-			s.sendDownload(c, idx, cfg)
+			s.sendDownload(sess, c, idx, cfg)
 		case MsgUpStart:
 			var cfg UpStartCfg
 			if json.Unmarshal(msg[1:], &cfg) != nil {
@@ -515,12 +544,11 @@ func (s *Server) serveObserver(c *wsConn, hello Hello, r *http.Request) {
 // means the kernel accepted the bytes into the socket buffer, not that they
 // reached the client, so the client's received-byte counter is the figure that
 // gets reported.
-func (s *Server) sendDownload(c *wsConn, idx int, cfg DownStartCfg) {
+func (s *Server) sendDownload(sess *Session, c *wsConn, idx int, cfg DownStartCfg) {
 	chunk := cfg.ChunkBytes
 	if chunk <= 0 || chunk > maxChunkSize {
 		chunk = defaultChunk
 	}
-	duration := clampDuration(cfg.DurationMs)
 
 	// Built once per phase from the pre-allocated buffer, then reused for every
 	// write in the loop below.
@@ -529,17 +557,29 @@ func (s *Server) sendDownload(c *wsConn, idx int, cfg DownStartCfg) {
 	copy(frame[1:], s.randomBuf[:chunk])
 
 	start := time.Now()
-	deadline := start.Add(duration)
-	var total int64
+	deadline := start.Add(clampDuration(cfg.DurationMs))
+	safetyCap := start.Add(maxManualDuration)
+	var total, frames int64
 	stalls := []StallEvent{}
 
-	for time.Now().Before(deadline) {
+	for {
+		if cfg.Manual {
+			// Ends when the operator says so. The cap is only a backstop for a
+			// client that disappears without sending stop.
+			if sess.stopRequested() || time.Now().After(safetyCap) {
+				break
+			}
+		} else if !time.Now().Before(deadline) {
+			break
+		}
+
 		writeStart := time.Now()
 		if err := c.writeRaw(frame, writeTimeout); err != nil {
 			log.Printf("download stream %d write error: %v", idx, err)
 			return
 		}
 		total += int64(chunk)
+		frames++
 		if wd := time.Since(writeStart); wd > stallThreshold {
 			stalls = append(stalls, StallEvent{
 				AtMs:       time.Since(start).Milliseconds(),
@@ -551,6 +591,8 @@ func (s *Server) sendDownload(c *wsConn, idx int, cfg DownStartCfg) {
 	_ = c.writeJSON(MsgDownDone, DownDoneMsg{
 		Index:      idx,
 		TotalBytes: total,
+		Frames:     frames,
+		FrameBytes: chunk,
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Stalls:     stalls,
 	})
@@ -560,12 +602,20 @@ func (s *Server) sendDownload(c *wsConn, idx int, cfg DownStartCfg) {
 // aligned to a start time shared by every stream in the session. Aligned
 // windows are what makes the per-stream series addable afterwards.
 func (s *Server) recvUpload(sess *Session, c *wsConn, idx int, cfg UpStartCfg) {
-	duration := clampDuration(cfg.DurationMs)
 	start := sess.beginUpload()
-	hardDeadline := time.Now().Add(duration + uploadGrace)
+	hardDeadline := time.Now().Add(clampDuration(cfg.DurationMs) + uploadGrace)
+
+	// A manual run has no known length, so the read deadline rolls forward on
+	// every frame instead: the stream stays open as long as data keeps coming.
+	nextDeadline := func() time.Time {
+		if cfg.Manual {
+			return time.Now().Add(manualIdleTimeout)
+		}
+		return hardDeadline
+	}
 
 	samples := []Sample{}
-	var winBytes, total int64
+	var winBytes, total, frames int64
 	cur := 0
 
 	// closeWindows emits every window from cur up to (but excluding) upTo. Gaps
@@ -589,7 +639,7 @@ func (s *Server) recvUpload(sess *Session, c *wsConn, idx int, cfg UpStartCfg) {
 	}
 
 	for {
-		_ = c.ws.SetReadDeadline(hardDeadline)
+		_ = c.ws.SetReadDeadline(nextDeadline())
 		_, msg, err := c.ws.ReadMessage()
 		if err != nil {
 			break
@@ -601,6 +651,7 @@ func (s *Server) recvUpload(sess *Session, c *wsConn, idx int, cfg UpStartCfg) {
 		case MsgUpData:
 			n := int64(len(msg) - 1)
 			total += n
+			frames++
 			if w := int(time.Since(start) / SampleWindow); w > cur {
 				closeWindows(w)
 			}
@@ -609,11 +660,11 @@ func (s *Server) recvUpload(sess *Session, c *wsConn, idx int, cfg UpStartCfg) {
 			// The final partial window is dropped rather than divided by a full
 			// window width, which would report a throughput collapse that never
 			// happened.
-			sess.endUpload(idx, samples, total)
+			sess.endUpload(idx, samples, total, frames)
 			return
 		}
 	}
-	sess.endUpload(idx, samples, total)
+	sess.endUpload(idx, samples, total, frames)
 }
 
 func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
@@ -632,7 +683,18 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 	download := Summarize(downMeasured, fm.Streams, WarmupMs)
 
 	// Upload was measured by this server, not reported by the client.
-	upload, _ := sess.uploadResult()
+	upload, uploadBytes, uploadFrames := sess.uploadResult()
+
+	mode := fm.Mode
+	if mode != ModeManual {
+		mode = ModeAuto
+	}
+	direction := fm.Direction
+	switch direction {
+	case DirectionDownload, DirectionUpload, DirectionBoth:
+	default:
+		direction = DirectionBoth
+	}
 
 	run := Run{
 		SchemaVersion: historySchemaVersion,
@@ -645,8 +707,17 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 		DurationMs:    fm.DurationMs,
 		Client:        describeUA(fm.UA),
 		ClientAddr:    sess.Peer.Addr,
-		Download:      download,
-		Upload:        upload,
+		Mode:          mode,
+		Direction:     direction,
+		Frames: FrameStats{
+			DownloadCount: fm.DownloadFrames,
+			UploadCount:   uploadFrames,
+			DownloadBytes: fm.DownloadTotalBytes,
+			UploadBytes:   uploadBytes,
+			FrameBytes:    fm.ChunkBytes,
+		},
+		Download: download,
+		Upload:   upload,
 		Latency: LatencyReport{
 			Idle:           withSent(SummarizeLatency(fm.RTTIdle), fm.PingsIdle),
 			LoadedDownload: withSent(SummarizeLatency(fm.RTTDownload), fm.PingsDownload),
@@ -696,7 +767,7 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 		}
 		run.Reliable = false
 	}
-	run.Verdict = BuildVerdict(run.Download, run.Upload, run.Bufferbloat, run.Aborted)
+	run.Verdict = BuildVerdict(run.Download, run.Upload, run.Bufferbloat, run.Direction, run.Aborted)
 	run.Caveats = caveats
 
 	stored, previous, err := s.history.Append(run)
@@ -840,10 +911,11 @@ func (sess *Session) beginUpload() time.Time {
 
 // endUpload records a stream's samples. The last stream to finish aggregates
 // everything and sends the result on the control connection.
-func (sess *Session) endUpload(idx int, samples []Sample, total int64) {
+func (sess *Session) endUpload(idx int, samples []Sample, total, frames int64) {
 	sess.mu.Lock()
 	sess.upSamples[idx] = samples
 	sess.upTotal += total
+	sess.upFrames += frames
 	if sess.upActive > 0 {
 		sess.upActive--
 	}
@@ -860,6 +932,7 @@ func (sess *Session) endUpload(idx int, samples []Sample, total int64) {
 	}
 	streams := len(sess.upSamples)
 	upTotal := sess.upTotal
+	upFrames := sess.upFrames
 	start := sess.upStart
 	control := sess.control
 	sess.mu.Unlock()
@@ -874,6 +947,7 @@ func (sess *Session) endUpload(idx int, samples []Sample, total int64) {
 
 	res := UpResultMsg{
 		TotalBytes: upTotal,
+		Frames:     upFrames,
 		ElapsedMs:  time.Since(start).Milliseconds(),
 		Streams:    streams,
 		Samples:    measured,

@@ -56,6 +56,21 @@ const (
 	MsgObserve   byte = 0x0F // S→C  observer payload: JSON ObserveEvent
 	MsgFinal     byte = 0x10 // C→S  control  payload: JSON FinalMsg
 	MsgStored    byte = 0x11 // S→C  control  payload: JSON StoredMsg (run + previous run)
+	MsgStop      byte = 0x12 // C→S  control  payload: (empty) — end a manual run now
+)
+
+// Test modes. "auto" is the fixed-length run used for comparable history;
+// "manual" runs one direction until the operator stops it.
+const (
+	ModeAuto   = "auto"
+	ModeManual = "manual"
+)
+
+// Directions a run can cover.
+const (
+	DirectionBoth     = "both"
+	DirectionDownload = "download"
+	DirectionUpload   = "upload"
 )
 
 // Connection roles. Sent in Hello.Role.
@@ -101,9 +116,12 @@ type Busy struct {
 }
 
 // DownStartCfg asks one stream to send for DurationMs using ChunkBytes frames.
+// With Manual set, DurationMs is ignored and the stream runs until the operator
+// sends STOP on the control connection (or the safety cap is reached).
 type DownStartCfg struct {
-	DurationMs int `json:"durationMs"`
-	ChunkBytes int `json:"chunkBytes"`
+	DurationMs int  `json:"durationMs"`
+	ChunkBytes int  `json:"chunkBytes"`
+	Manual     bool `json:"manual"`
 }
 
 // DownDoneMsg is the server's own view of one download stream. The client's
@@ -113,6 +131,8 @@ type DownStartCfg struct {
 type DownDoneMsg struct {
 	Index      int          `json:"index"`
 	TotalBytes int64        `json:"totalBytes"`
+	Frames     int64        `json:"frames"`
+	FrameBytes int          `json:"frameBytes"`
 	ElapsedMs  int64        `json:"elapsedMs"`
 	Stalls     []StallEvent `json:"stalls"`
 }
@@ -124,9 +144,11 @@ type StallEvent struct {
 	DurationMs int64 `json:"duration_ms"`
 }
 
-// UpStartCfg asks the server to receive on this stream for DurationMs.
+// UpStartCfg asks the server to receive on this stream for DurationMs. With
+// Manual set the server keeps reading until the client says it is done.
 type UpStartCfg struct {
-	DurationMs int `json:"durationMs"`
+	DurationMs int  `json:"durationMs"`
+	Manual     bool `json:"manual"`
 }
 
 // UpResultMsg is the aggregate of every upload stream in the session. Upload is
@@ -134,6 +156,7 @@ type UpStartCfg struct {
 // arrived.
 type UpResultMsg struct {
 	TotalBytes  int64    `json:"totalBytes"`
+	Frames      int64    `json:"frames"`
 	ElapsedMs   int64    `json:"elapsedMs"`
 	Streams     int      `json:"streams"`
 	Samples     []Sample `json:"samples"`
@@ -166,6 +189,16 @@ type Progress struct {
 type FinalMsg struct {
 	Streams    int   `json:"streams"`
 	DurationMs int64 `json:"durationMs"`
+	// Mode is "auto" or "manual"; Direction is "both", "download" or "upload".
+	// Both are recorded so a manual single-direction run is never compared
+	// against a fixed-length two-direction one.
+	Mode      string `json:"mode"`
+	Direction string `json:"direction"`
+	// ChunkBytes is the payload size of one test frame, and DownloadFrames is
+	// how many the client actually received. These are WebSocket messages, not
+	// IP packets: TCP re-segments them to the path MTU on the way.
+	ChunkBytes     int   `json:"chunkBytes"`
+	DownloadFrames int64 `json:"downloadFrames"`
 
 	// DownloadSamples is the client's aggregate byte count per window, summed
 	// across every stream. The client's counter is authoritative for download.

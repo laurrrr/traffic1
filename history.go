@@ -36,6 +36,19 @@ type Run struct {
 	Client     string `json:"client"`
 	ClientAddr string `json:"client_addr,omitempty"`
 
+	// Mode is "auto" (fixed length, both directions) or "manual" (one
+	// direction, ended by the operator). Direction says which directions the
+	// run actually covered. Runs are only ever compared against runs of the
+	// same shape.
+	Mode      string `json:"mode"`
+	Direction string `json:"direction"`
+
+	// Frames counts the WebSocket messages the test moved, and the payload size
+	// of one. These are application frames, not IP packets: TCP re-segments
+	// them to the path MTU, so the number of packets on the wire is different
+	// and is not something a browser can observe.
+	Frames FrameStats `json:"frames"`
+
 	Download DirStats `json:"download"`
 	Upload   DirStats `json:"upload"`
 
@@ -127,9 +140,14 @@ func (h *HistoryStore) Append(r Run) (Run, *Run, error) {
 		log.Printf("history: %v (starting a new file)", err)
 	}
 
+	// Comparable means: same network, same mode, same direction. A manual
+	// download-only run and a fixed 10 s two-way run measure different things.
 	var previous *Run
 	for i := range runs {
-		if runs[i].NetworkKey == r.NetworkKey && runs[i].ID != r.ID && !runs[i].Aborted {
+		if runs[i].NetworkKey == r.NetworkKey &&
+			runs[i].Mode == r.Mode &&
+			runs[i].Direction == r.Direction &&
+			runs[i].ID != r.ID && !runs[i].Aborted {
 			p := runs[i]
 			previous = &p
 			break
