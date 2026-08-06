@@ -178,6 +178,16 @@ type FinalMsg struct {
 	RTTIdle     []float64 `json:"rttIdle"`
 	RTTDownload []float64 `json:"rttDownload"`
 	RTTUpload   []float64 `json:"rttUpload"`
+	// Pings* is how many pings were issued in each phase. Compared against the
+	// number of replies above, it shows when latency could not be observed
+	// during the load at all.
+	PingsIdle     int `json:"pingsIdle"`
+	PingsDownload int `json:"pingsDownload"`
+	PingsUpload   int `json:"pingsUpload"`
+	// SchedulingLag is how late the client's own 100 ms timer fired during the
+	// load phases. It bounds how much of the measured latency increase is the
+	// browser failing to run code rather than the network being slow.
+	SchedulingLag []float64 `json:"schedulingLag"`
 
 	Reliable bool     `json:"reliable"`
 	Aborted  bool     `json:"aborted"`

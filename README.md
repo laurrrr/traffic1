@@ -25,10 +25,15 @@ Serverul afișează adresele LAN și un cod QR. Scanezi cu telefonul, apeși
 Pentru fereastra desktop:
 
 ```bash
-go build -tags desktop -o lantest-desktop .                # macOS, Windows
-go build -tags "desktop webkit2_41" -o lantest-desktop .   # Linux
+go build -tags "desktop,production" -o lantest-desktop .                # macOS, Windows
+go build -tags "desktop,production,webkit2_41" -o lantest-desktop .     # Linux
 ./lantest-desktop
 ```
+
+Ambele tag-uri sunt obligatorii: `desktop` selectează shell-ul din acest repo,
+`production` e cerut de Wails. Fără `production`, Wails compilează un stub care
+eșuează la rulare — build-ul e configurat să refuze din start, cu mesajul
+corect.
 
 ### Opțiuni
 
@@ -46,9 +51,14 @@ cross-compile de pe Linux pentru macOS/Windows nu funcționează.
 
 | Platformă | Dependențe | Comandă |
 |-----------|-----------|---------|
-| **Linux** | `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` | `go build -tags "desktop webkit2_41" -o lantest-desktop .` |
-| **macOS** | Xcode Command Line Tools (WKWebView vine cu sistemul) | `go build -tags desktop -o lantest-desktop .` |
-| **Windows** | WebView2 Runtime (preinstalat pe Windows 11) | `go build -tags desktop -o lantest-desktop.exe .` |
+| **Linux** | `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` | `go build -tags "desktop,production,webkit2_41" -o lantest-desktop .` |
+| **macOS** | Xcode Command Line Tools (WKWebView vine cu sistemul) | `go build -tags "desktop,production" -o lantest-desktop .` |
+| **Windows** | WebView2 Runtime (preinstalat pe Windows 11) | `go build -tags "desktop,production" -ldflags "-H windowsgui" -o lantest-desktop.exe .` |
+
+Pe Linux, `webkit2_41` e necesar pentru WebKitGTK 4.1 (Ubuntu 24.04 și mai nou).
+Pe distribuții cu WebKitGTK 4.0 lasă tag-ul deoparte și instalează
+`libwebkit2gtk-4.0-dev`. Pe Windows, `-H windowsgui` scapă de fereastra de
+consolă din spatele aplicației. Pentru binare mai mici, adaugă `-ldflags "-w -s"`.
 
 Pe Ubuntu/Debian:
 
@@ -98,6 +108,7 @@ O rulare folosește mai multe conexiuni WebSocket cu același ID de sesiune:
 | Upload | Clientul trimite 10 s pe N streamuri; **serverul** numără octeții |
 | Latență sub sarcină | Ping continuu (100 ms) în timpul download-ului și al upload-ului |
 | Bufferbloat | p95 sub sarcină − p50 în repaus, cu notă de la A la F |
+| Verificări de încredere | blocaj al firului principal, ping-uri fără răspuns, tampon implicat imposibil |
 | Pierdere de pachete | **NEMĂSURAT** — TCP ascunde retransmisiile |
 
 Fiecare direcție e numărată de capătul care știe adevărul. La download,
@@ -123,6 +134,21 @@ Un singur stream TCP rareori saturează Wi-Fi-ul modern. Throughput-ul se agreg�
 sub-raporta legătura de N ori; concatenarea ar număra aceeași secundă de mai
 multe ori. Ferestrele sunt aliniate la un moment de start comun întregii
 sesiuni, ceea ce face suma validă.
+
+### Când o cifră e refuzată
+
+Nota de bufferbloat e dată doar dacă poate fi atribuită rețelei. Trei condiții o
+invalidează, fiecare măsurată separat:
+
+1. **Firul principal al browserului a fost blocat** — un timer de 100 ms care
+   întârzie mult înseamnă că pagina și-a măsurat propria întârziere.
+2. **Ping-urile nu s-au întors** — dacă sub jumătate primesc răspuns, cele care
+   ajung sunt prin construcție coada cea mai lentă.
+3. **Tamponul implicat e imposibil** — `întârziere × debit` dă câți octeți ar fi
+   trebuit să stea în coadă undeva pe drum. Peste 256 MB, coada nu e în rețea.
+
+Când vreuna se declanșează, rularea e marcată nesigură, insigna arată `?` în loc
+de o notă, iar verdictul spune ce s-a întâmplat de fapt.
 
 ### Statistica trăiește într-un singur loc
 
@@ -165,6 +191,17 @@ Astea nu sunt detalii de subsol, sunt motivele pentru care unele cifre nu
 - **Browserul e un instrument de măsură imperfect.** Ecranul stins sau tab-ul în
   fundal opresc timerele și blochează socket-ul; rularea e marcată ca nesigură,
   nu raportată ca normală.
+- **Pe legături foarte rapide, dispozitivul devine el însuși bufferul.** Un
+  browser livrează toate mesajele WebSocket pe un singur fir. Peste câțiva Gbps
+  (bucla locală, 2,5/10 GbE) răspunsul la un ping ajunge să stea în coadă în
+  spatele datelor de test, iar round-trip-ul măsurat include acea coadă. Firul
+  principal poate arăta perfect sănătos în tot acest timp — timerele se declanșează
+  la vreme, toate ping-urile primesc răspuns — deci nicio verificare din client nu
+  vede problema. Ce o prinde e fizica: întârzierea de așteptare înseamnă tampon
+  împărțit la rată, așa că unealta calculează cât tampon ar fi implicat de
+  creșterea măsurată. Peste 256 MB refuză să dea o notă și spune de ce, în loc să
+  raporteze „bufferbloat foarte sever" pentru ceva ce e de fapt coada propriului
+  browser. La viteze de Wi-Fi asta nu se întâmplă niciodată.
 - **Throughput-ul de upload live e o estimare.** Clientul poate ști doar câți
   octeți a predat lui `send()` minus ce e încă în coadă. Cifra finală vine de la
   server.

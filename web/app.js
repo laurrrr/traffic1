@@ -452,20 +452,25 @@ function newRun(streams) {
     hidden: false,
     caveats: [],
     pendingPings: new Map(),
+    pingPhase: new Map(),
+    sent: { idle: 0, download: 0, upload: 0 },
     rtt: { idle: [], download: [], upload: [] },
+    lag: [],
     lastRTT: NaN,
     down: { start: 0, total: 0, windows: new Map(), serverBytes: 0 },
     up: { start: 0, sent: 0 },
     pinger: null,
-    sampler: null
+    sampler: null,
+    lagTimer: null,
+    lagLast: 0
   };
 }
 
-function bucket() {
-  if (!run) return null;
-  if (run.phase === 'download') return run.rtt.download;
-  if (run.phase === 'upload') return run.rtt.upload;
-  return run.rtt.idle;
+// bucketName maps a test phase onto the latency bucket it belongs to.
+function bucketName(phase) {
+  if (phase === 'download') return 'download';
+  if (phase === 'upload') return 'upload';
+  return 'idle';
 }
 
 function addCaveat(msg) {
@@ -482,6 +487,17 @@ function sendPingOn(conn) {
   v.setUint8(0, MSG.PING);
   v.setFloat64(1, t0);
   conn.ws.send(buf);
+
+  // Tag by the phase the ping was *sent* in, not the one running when the reply
+  // turns up. Under load a reply can arrive after the phase boundary, and
+  // bucketing it on arrival credits the download's latency to the upload.
+  // Counting what was sent also lets the server notice when replies simply
+  // never came back during the load at all.
+  if (run && conn === run.control) {
+    var b = bucketName(run.phase);
+    run.pingPhase.set(t0, b);
+    run.sent[b] += 1;
+  }
   return t0;
 }
 
@@ -504,8 +520,10 @@ function onPong(payload) {
   var sent = view.getFloat64(0);
   var rtt = performance.now() - sent;
 
-  var b = bucket();
-  if (b) b.push(rtt);
+  var name = run.pingPhase.get(sent);
+  if (name !== undefined) run.pingPhase.delete(sent);
+  else name = bucketName(run.phase);
+  run.rtt[name].push(rtt);
   run.lastRTT = rtt;
   text('live-rtt', fmtMs(rtt));
   if (chart && run.startedAt) chart.addLatency(performance.now() - run.startedAt, rtt);
@@ -517,15 +535,33 @@ function onPong(payload) {
 // startPinger keeps measuring latency *while* the link is saturated. It runs on
 // the control connection, which carries no bulk data, so a ping is not stuck
 // behind megabytes of test traffic in the same send queue.
+//
+// That is necessary but not sufficient. A browser dispatches every WebSocket
+// message on one thread, so on a very fast link the reply to a ping can sit in
+// the event queue behind the test data itself. The measured round trip then
+// includes time the page spent unable to run at all, which is not network
+// latency. The second timer below measures exactly that: how late a plain
+// 100 ms interval fires while the transfer is running. The server uses it to
+// decide whether the bufferbloat figure describes the link or the device.
 function startPinger() {
   stopPinger();
   run.pinger = setInterval(function () {
     if (run && !run.aborted) sendPingOn(run.control);
   }, LOADED_PING_MS);
+
+  run.lagLast = performance.now();
+  run.lagTimer = setInterval(function () {
+    if (!run) return;
+    var now = performance.now();
+    run.lag.push(Math.max(0, now - run.lagLast - LOADED_PING_MS));
+    run.lagLast = now;
+  }, LOADED_PING_MS);
 }
 
 function stopPinger() {
-  if (run && run.pinger) { clearInterval(run.pinger); run.pinger = null; }
+  if (!run) return;
+  if (run.pinger) { clearInterval(run.pinger); run.pinger = null; }
+  if (run.lagTimer) { clearInterval(run.lagTimer); run.lagTimer = null; }
 }
 
 // ── phases ──────────────────────────────────────────────────────────────────
@@ -838,6 +874,10 @@ function sendFinal() {
     rttIdle: run.rtt.idle,
     rttDownload: run.rtt.download,
     rttUpload: run.rtt.upload,
+    pingsIdle: run.sent.idle,
+    pingsDownload: run.sent.download,
+    pingsUpload: run.sent.upload,
+    schedulingLag: run.lag,
     reliable: !run.hidden && !run.aborted,
     aborted: run.aborted,
     caveats: run.caveats,
@@ -894,9 +934,15 @@ function renderResult(stored) {
   var r = stored.run;
 
   text('verdict', r.verdict || '');
+  // A grade is only shown when it means something. When the measurement was
+  // dominated by the measuring device, printing a red "F" would be asserting
+  // the exact thing the verdict just said it cannot assert.
+  var bb = r.bufferbloat || {};
   var grade = $('grade');
-  grade.textContent = (r.bufferbloat && r.bufferbloat.grade) || '–';
-  grade.setAttribute('data-grade', (r.bufferbloat && r.bufferbloat.grade) || '');
+  var trusted = bb.trustworthy !== false && bb.grade && bb.grade !== '?';
+  grade.textContent = trusted ? bb.grade : '?';
+  grade.setAttribute('data-grade', trusted ? bb.grade : '');
+  grade.title = trusted ? bb.label || '' : 'Latența sub sarcină nu a putut fi atribuită rețelei';
 
   text('r-down-p50', fmtMbps(r.download.p50_mbps));
   text('r-down-p95', fmtMbps(r.download.p95_mbps) + ' Mbps');
@@ -904,8 +950,8 @@ function renderResult(stored) {
   text('r-up-p95', fmtMbps(r.upload.p95_mbps) + ' Mbps');
   text('r-lat-idle', fmtMs(r.latency.idle.p50_ms));
   text('r-lat-jitter', fmtMs(r.latency.idle.jitter_ms) + ' ms');
-  text('r-lat-loaded', fmtMs(r.bufferbloat.loaded_p95_ms));
-  text('r-bloat-delta', '+' + fmtMs(r.bufferbloat.delta_ms) + ' ms');
+  text('r-lat-loaded', fmtMs(bb.loaded_p95_ms));
+  text('r-bloat-delta', trusted ? '+' + fmtMs(bb.delta_ms) + ' ms' : 'necredibil');
 
   renderComparison(stored.previous, r);
   renderCaveats(r);
@@ -954,9 +1000,16 @@ function renderAdvanced(r) {
   text('a-down', fmtMbps(r.download.p50_mbps) + ' / ' + fmtMbps(r.download.p95_mbps) + ' / ' + fmtMbps(r.download.max_mbps) + ' Mbps');
   text('a-up', fmtMbps(r.upload.p50_mbps) + ' / ' + fmtMbps(r.upload.p95_mbps) + ' / ' + fmtMbps(r.upload.max_mbps) + ' Mbps');
   text('a-lat-idle', fmtMs(r.latency.idle.min_ms) + ' / ' + fmtMs(r.latency.idle.p50_ms) + ' / ' + fmtMs(r.latency.idle.p95_ms) + ' ms (' + r.latency.idle.count + ' pachete)');
-  text('a-lat-down', fmtMs(r.latency.loaded_download.p50_ms) + ' / ' + fmtMs(r.latency.loaded_download.p95_ms) + ' ms (' + r.latency.loaded_download.count + ')');
-  text('a-lat-up', fmtMs(r.latency.loaded_upload.p50_ms) + ' / ' + fmtMs(r.latency.loaded_upload.p95_ms) + ' ms (' + r.latency.loaded_upload.count + ')');
-  text('a-bloat', 'nota ' + r.bufferbloat.grade + ' — ' + r.bufferbloat.label + ' (+' + fmtMs(r.bufferbloat.delta_ms) + ' ms)');
+  text('a-lat-down', fmtMs(r.latency.loaded_download.p50_ms) + ' / ' + fmtMs(r.latency.loaded_download.p95_ms) +
+    ' ms (' + r.latency.loaded_download.count + '/' + r.latency.loaded_download.sent + ' răspunsuri)');
+  text('a-lat-up', fmtMs(r.latency.loaded_upload.p50_ms) + ' / ' + fmtMs(r.latency.loaded_upload.p95_ms) +
+    ' ms (' + r.latency.loaded_upload.count + '/' + r.latency.loaded_upload.sent + ' răspunsuri)');
+  text('a-bloat', 'nota ' + r.bufferbloat.grade + ' — ' + r.bufferbloat.label + ' (+' + fmtMs(r.bufferbloat.delta_ms) + ' ms)' +
+    (r.bufferbloat.trustworthy ? '' : ' — NECREDIBIL, vezi mai jos'));
+  text('a-buffer', r.bufferbloat.implied_buffer_bytes
+    ? fmtBytes(r.bufferbloat.implied_buffer_bytes) + ' ar fi necesari în rețea pentru această creștere'
+    : '–');
+  text('a-lag', fmtMs(r.latency.scheduling_lag.p95_ms) + ' ms p95 (' + r.latency.scheduling_lag.count + ' probe)');
   text('a-warmup', r.warmup_discarded_ms + ' ms din fiecare direcție');
   text('a-warmup-inline', String(r.warmup_discarded_ms));
   text('a-bytes', fmtBytes(r.download.total_bytes) + ' download / ' + fmtBytes(r.upload.total_bytes) + ' upload (doar ferestrele măsurate)');

@@ -648,9 +648,10 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 		Download:      download,
 		Upload:        upload,
 		Latency: LatencyReport{
-			Idle:           SummarizeLatency(fm.RTTIdle),
-			LoadedDownload: SummarizeLatency(fm.RTTDownload),
-			LoadedUpload:   SummarizeLatency(fm.RTTUpload),
+			Idle:           withSent(SummarizeLatency(fm.RTTIdle), fm.PingsIdle),
+			LoadedDownload: withSent(SummarizeLatency(fm.RTTDownload), fm.PingsDownload),
+			LoadedUpload:   withSent(SummarizeLatency(fm.RTTUpload), fm.PingsUpload),
+			Scheduling:     SummarizeLatency(fm.SchedulingLag),
 		},
 		Reliable:   fm.Reliable,
 		Aborted:    fm.Aborted,
@@ -668,7 +669,33 @@ func (s *Server) handleFinal(sess *Session, c *wsConn, payload []byte) {
 		}
 	}
 
-	run.Bufferbloat = ComputeBufferbloat(run.Latency)
+	run.Bufferbloat = ComputeBufferbloat(run.Latency, math.Max(download.P95Mbps, upload.P95Mbps))
+	if !run.Bufferbloat.Trustworthy && run.Bufferbloat.Grade != "?" {
+		// The client could not run its own code promptly, so what it timed
+		// includes its own scheduling delay. Saying "severe bufferbloat" here
+		// would be blaming the network for the browser.
+		if run.Bufferbloat.ImpliedBufferBytes > maxPlausibleBufferBytes {
+			caveats = append(caveats, fmt.Sprintf(
+				"Creșterea de latență măsurată (%s) ar cere %s de tampon în rețea la %s. "+
+					"Nu există așa ceva: întârzierea s-a acumulat în coada de mesaje a "+
+					"clientului, care nu face față acestei viteze. Testează de pe un telefon, pe Wi-Fi.",
+				FormatMs(run.Bufferbloat.DeltaMs),
+				FormatBytes(run.Bufferbloat.ImpliedBufferBytes),
+				FormatMbps(math.Max(download.P95Mbps, upload.P95Mbps))))
+		} else if run.Bufferbloat.AnsweredRatio < minAnsweredRatio {
+			caveats = append(caveats, fmt.Sprintf(
+				"Doar %.0f%% dintre pachetele de latență au primit răspuns în timpul încărcării; "+
+					"legătura e prea rapidă pentru acest dispozitiv, iar cifra sub sarcină "+
+					"măsoară stiva lui de rețea, nu bufferele din cale.",
+				run.Bufferbloat.AnsweredRatio*100))
+		} else {
+			caveats = append(caveats, fmt.Sprintf(
+				"Firul principal al browserului a fost blocat până la %s în timpul testului; "+
+					"latența sub sarcină include această întârziere, nu doar rețeaua.",
+				FormatMs(run.Bufferbloat.SchedulingLagMs)))
+		}
+		run.Reliable = false
+	}
 	run.Verdict = BuildVerdict(run.Download, run.Upload, run.Bufferbloat, run.Aborted)
 	run.Caveats = caveats
 
@@ -873,6 +900,12 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(strings.Trim(addr, "[]"))
 	return ip != nil && ip.IsLoopback()
+}
+
+// withSent records how many pings a phase issued alongside how many came back.
+func withSent(st LatencyStats, sent int) LatencyStats {
+	st.Sent = sent
+	return st
 }
 
 // sanitizeID keeps a client-supplied session ID to a harmless shape.

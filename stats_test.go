@@ -241,7 +241,7 @@ func TestComputeBufferbloat(t *testing.T) {
 		LoadedDownload: LatencyStats{Count: 100, P95Ms: 45},
 		LoadedUpload:   LatencyStats{Count: 100, P95Ms: 20},
 	}
-	bb := ComputeBufferbloat(r)
+	bb := ComputeBufferbloat(r, 480)
 	almost(t, bb.IdleP50Ms, 3, "idle")
 	almost(t, bb.LoadedP95Ms, 45, "worst loaded direction wins")
 	almost(t, bb.DeltaMs, 42, "delta")
@@ -251,7 +251,7 @@ func TestComputeBufferbloat(t *testing.T) {
 }
 
 func TestComputeBufferbloatWithoutLoadedSamples(t *testing.T) {
-	bb := ComputeBufferbloat(LatencyReport{Idle: LatencyStats{Count: 50, P50Ms: 3}})
+	bb := ComputeBufferbloat(LatencyReport{Idle: LatencyStats{Count: 50, P50Ms: 3}}, 480)
 	if bb.Grade != "?" {
 		t.Errorf("expected unknown grade, got %q", bb.Grade)
 	}
@@ -263,7 +263,7 @@ func TestComputeBufferbloatNeverNegative(t *testing.T) {
 	bb := ComputeBufferbloat(LatencyReport{
 		Idle:           LatencyStats{Count: 50, P50Ms: 10},
 		LoadedDownload: LatencyStats{Count: 50, P95Ms: 8},
-	})
+	}, 480)
 	if bb.DeltaMs < 0 {
 		t.Errorf("delta must clamp at 0, got %v", bb.DeltaMs)
 	}
@@ -275,7 +275,11 @@ func TestComputeBufferbloatNeverNegative(t *testing.T) {
 func TestBuildVerdict(t *testing.T) {
 	down := DirStats{Samples: 30, P50Mbps: 480}
 	up := DirStats{Samples: 30, P50Mbps: 310}
-	bb := Bufferbloat{IdleP50Ms: 3, LoadedP95Ms: 45, DeltaMs: 42, Grade: "C", Label: "bufferbloat moderat"}
+	bb := Bufferbloat{
+		IdleP50Ms: 3, LoadedP95Ms: 45, DeltaMs: 42,
+		Grade: "C", Label: "bufferbloat moderat",
+		Trustworthy: true,
+	}
 
 	v := BuildVerdict(down, up, bb, false)
 	for _, want := range []string{"480 Mbps", "310 Mbps", "3.0 ms", "45 ms", "bufferbloat moderat"} {
@@ -286,7 +290,7 @@ func TestBuildVerdict(t *testing.T) {
 }
 
 func TestBuildVerdictAborted(t *testing.T) {
-	v := BuildVerdict(DirStats{Samples: 5}, DirStats{Samples: 5}, Bufferbloat{Grade: "A"}, true)
+	v := BuildVerdict(DirStats{Samples: 5}, DirStats{Samples: 5}, Bufferbloat{Grade: "A", Trustworthy: true}, true)
 	if !strings.Contains(v, "întreruptă") {
 		t.Errorf("aborted run must say so, got %q", v)
 	}
@@ -349,5 +353,208 @@ func TestFormatters(t *testing.T) {
 	}
 	if got := FormatMs(3.04); got != "3.0 ms" {
 		t.Errorf("FormatMs(3.04) = %q", got)
+	}
+}
+
+// A browser that cannot dispatch its own events measures its own delay and
+// calls it latency. Here the implied buffering is entirely plausible (1.2 MB),
+// so only the stalled main thread explains the figure — a phone that got
+// throttled or backgrounded on a modest link.
+func TestBufferbloatFlagsBrowserSchedulingDelay(t *testing.T) {
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 5},
+		LoadedDownload: LatencyStats{Count: 100, Sent: 100, P95Ms: 205},
+		Scheduling:     LatencyStats{Count: 100, P95Ms: 150},
+	}, 50)
+
+	if bb.ImpliedBufferBytes > maxPlausibleBufferBytes {
+		t.Fatalf("this case must not trip the physics check: %s", FormatBytes(bb.ImpliedBufferBytes))
+	}
+	if bb.Trustworthy {
+		t.Error("a run where the main thread stalled for 150 ms must not be trusted")
+	}
+	if bb.SchedulingLagMs != 150 {
+		t.Errorf("scheduling lag not carried through: %v", bb.SchedulingLagMs)
+	}
+
+	verdict := BuildVerdict(
+		DirStats{Samples: 8, P50Mbps: 50},
+		DirStats{Samples: 8, P50Mbps: 20},
+		bb, false)
+	if strings.Contains(verdict, "bufferbloat") {
+		t.Errorf("an untrustworthy run must not be graded as bufferbloat: %q", verdict)
+	}
+	if !strings.Contains(verdict, "browserul a fost blocat") {
+		t.Errorf("verdict should name the real cause, got %q", verdict)
+	}
+}
+
+func TestBufferbloatTrustedWhenSchedulingIsClean(t *testing.T) {
+	// Real Wi-Fi: 45 ms under load with the main thread only ~3 ms late.
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 3},
+		LoadedDownload: LatencyStats{Count: 100, Sent: 100, P95Ms: 45},
+		Scheduling:     LatencyStats{Count: 100, P95Ms: 3},
+	}, 480)
+	if !bb.Trustworthy {
+		t.Error("a few ms of timer jitter must not invalidate a run")
+	}
+	if bb.Grade != "C" {
+		t.Errorf("grade: got %q, want C", bb.Grade)
+	}
+	if !strings.Contains(BuildVerdict(DirStats{Samples: 8, P50Mbps: 480}, DirStats{Samples: 8, P50Mbps: 310}, bb, false), "bufferbloat moderat") {
+		t.Error("a clean run should still be graded normally")
+	}
+}
+
+// Lag below the noise floor never invalidates a run, even when the network
+// genuinely showed no bufferbloat at all.
+func TestBufferbloatNoiseFloor(t *testing.T) {
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, P50Ms: 3},
+		LoadedDownload: LatencyStats{Count: 100, P95Ms: 3.5},
+		Scheduling:     LatencyStats{Count: 100, P95Ms: 2},
+	}, 480)
+	if !bb.Trustworthy {
+		t.Errorf("2 ms of lag is noise, not a problem: %+v", bb)
+	}
+	if bb.Grade != "A" {
+		t.Errorf("grade: got %q, want A", bb.Grade)
+	}
+}
+
+func TestAnsweredRatio(t *testing.T) {
+	tests := []struct {
+		name        string
+		count, sent int
+		want        float64
+	}{
+		{"all answered", 100, 100, 1},
+		{"half answered", 50, 100, 0.5},
+		{"none answered", 0, 100, 0},
+		{"no pings issued counts as fine", 0, 0, 1},
+		{"more replies than pings clamps", 110, 100, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := LatencyStats{Count: tc.count, Sent: tc.sent}.AnsweredRatio()
+			almost(t, got, tc.want, "AnsweredRatio")
+		})
+	}
+}
+
+// The failure this actually caught: on a link fast enough to saturate the
+// client's own network stack, almost no ping comes back while the load runs.
+// The few that do are the slowest stragglers, so grading them as bufferbloat
+// blames the router for the measuring device.
+func TestBufferbloatFlagsUnansweredPings(t *testing.T) {
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 1},
+		LoadedDownload: LatencyStats{Count: 0, Sent: 100},
+		LoadedUpload:   LatencyStats{Count: 8, Sent: 100, P95Ms: 10854},
+		Scheduling:     LatencyStats{Count: 234, P95Ms: 8}, // main thread was fine
+	}, 3480)
+	if bb.Trustworthy {
+		t.Error("a run where the pings never came back must not be trusted")
+	}
+	almost(t, bb.AnsweredRatio, 0, "answered ratio takes the worst phase")
+
+	verdict := BuildVerdict(
+		DirStats{Samples: 8, P50Mbps: 3480},
+		DirStats{Samples: 8, P50Mbps: 2602},
+		bb, false)
+	if strings.Contains(verdict, "bufferbloat") {
+		t.Errorf("must not grade this as bufferbloat: %q", verdict)
+	}
+	if !strings.Contains(verdict, "răspuns") {
+		t.Errorf("verdict should name the unanswered pings, got %q", verdict)
+	}
+}
+
+func TestBufferbloatTrustedWhenPingsAreAnswered(t *testing.T) {
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 3},
+		LoadedDownload: LatencyStats{Count: 96, Sent: 100, P95Ms: 45},
+		LoadedUpload:   LatencyStats{Count: 98, Sent: 100, P95Ms: 28},
+		Scheduling:     LatencyStats{Count: 200, P95Ms: 3},
+	}, 480)
+	if !bb.Trustworthy {
+		t.Errorf("a healthy run must stay trusted: %+v", bb)
+	}
+	if bb.Grade != "C" {
+		t.Errorf("grade: got %q, want C", bb.Grade)
+	}
+}
+
+// The failure this actually caught, in its final form: on a 4 Gbps loopback the
+// client's own message queue ran seconds deep while its timers still fired on
+// time and every ping was eventually answered. Nothing client-side looked
+// wrong — but 10 s of queueing delay at 4 Gbps implies 5 GB of buffer, and no
+// LAN path holds that.
+func TestBufferbloatRejectsPhysicallyImpossibleBuffering(t *testing.T) {
+	report := LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 1},
+		LoadedDownload: LatencyStats{Count: 110, Sent: 110, P95Ms: 10176},
+		LoadedUpload:   LatencyStats{Count: 133, Sent: 133, P95Ms: 9800},
+		Scheduling:     LatencyStats{Count: 234, P95Ms: 8},
+	}
+	bb := ComputeBufferbloat(report, 4049)
+
+	if bb.AnsweredRatio != 1 {
+		t.Errorf("every ping was answered; ratio should be 1, got %v", bb.AnsweredRatio)
+	}
+	if bb.Trustworthy {
+		t.Error("10 s of delay at 4 Gbps is not something a LAN can buffer")
+	}
+	if bb.ImpliedBufferBytes < 4<<30 {
+		t.Errorf("implied buffer should be gigabytes, got %s", FormatBytes(bb.ImpliedBufferBytes))
+	}
+
+	verdict := BuildVerdict(
+		DirStats{Samples: 42, P50Mbps: 4049},
+		DirStats{Samples: 50, P50Mbps: 2368},
+		bb, false)
+	if strings.Contains(verdict, "bufferbloat") {
+		t.Errorf("must not be graded as bufferbloat: %q", verdict)
+	}
+	if !strings.Contains(verdict, "tampon") {
+		t.Errorf("verdict should explain the impossible buffer, got %q", verdict)
+	}
+}
+
+// Genuinely awful bufferbloat on a slow link must still be graded, not
+// dismissed: 800 ms at 100 Mbps is only 10 MB of buffering, which is real.
+func TestBufferbloatAcceptsSevereButPossibleBuffering(t *testing.T) {
+	bb := ComputeBufferbloat(LatencyReport{
+		Idle:           LatencyStats{Count: 50, Sent: 50, P50Ms: 8},
+		LoadedDownload: LatencyStats{Count: 100, Sent: 100, P95Ms: 808},
+		Scheduling:     LatencyStats{Count: 100, P95Ms: 3},
+	}, 100)
+
+	if !bb.Trustworthy {
+		t.Errorf("real bufferbloat must not be explained away: %+v", bb)
+	}
+	if bb.Grade != "F" {
+		t.Errorf("grade: got %q, want F", bb.Grade)
+	}
+	if bb.ImpliedBufferBytes > maxPlausibleBufferBytes {
+		t.Errorf("10 MB of buffering is entirely possible, got %s", FormatBytes(bb.ImpliedBufferBytes))
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	tests := []struct {
+		in   int64
+		want string
+	}{
+		{512, "512 B"},
+		{2048, "2 kB"},
+		{5 << 20, "5 MB"},
+		{5528975667, "5.1 GB"},
+	}
+	for _, tc := range tests {
+		if got := FormatBytes(tc.in); got != tc.want {
+			t.Errorf("FormatBytes(%d) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

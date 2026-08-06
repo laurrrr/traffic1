@@ -63,11 +63,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            tags: "desktop webkit2_41"
+            tags: "desktop,production,webkit2_41"
           - os: macos-latest
-            tags: "desktop"
+            tags: "desktop,production"
           - os: windows-latest
-            tags: "desktop"
+            tags: "desktop,production"
     steps:
       - uses: actions/checkout@v4
 
