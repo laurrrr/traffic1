@@ -242,37 +242,25 @@ Cifrele din tabel sunt ale **serverului**. La download cifra raportată în
 rezultat rămâne a clientului; vezi
 [Metodologia măsurătorii](#metodologia-măsurătorii).
 
-## Arhitectură
+## Cum se folosește interfața
 
-Un singur binar. Frontend-ul e unul singur, embed-uit cu `go:embed`, și rulează
-identic în ambele locuri pentru că **nu folosește bindings Wails pentru nimic
-din ce se măsoară** — vorbește exclusiv WebSocket cu serverul local:
+Aceeași pagină rulează pe telefon și în fereastra desktop. Layout-ul se alege
+după lățimea ecranului — „client" (un buton mare) sub 900 px, „host" (dashboard)
+peste — și se poate forța din butonul **Vedere** din colț.
 
-```
-fereastra desktop ──► http.Handler ──► ws://127.0.0.1:8080/ws
-telefon (browser) ──► http.Handler ──► ws://192.168.x.x:8080/ws
-                       (același)          (același protocol)
-```
+### Setări
 
-Bindings-urile Wails există doar pentru ce un tab de browser nu poate face:
-dialogul nativ de salvare și deschiderea unui link în browserul sistemului.
-Ambele sunt feature-detected, deci lipsa lor nu schimbă nimic pe telefon.
+Trei controale, pe ecranul de start:
 
-Layout-ul se alege după viewport — „host" (dashboard pe desktop) sau „client"
-(un buton mare pe telefon) — cu buton de override manual.
+| Control | Opțiuni | Implicit |
+|---|---|---|
+| **Direcție** | Ambele · Download · Upload | Ambele |
+| **Durată** | 10 s fix · Până la Stop | 10 s fix |
+| **Streamuri paralele** | 1 · 4 · 8 | 4 |
 
-### Conexiuni
+Alegerile se rețin în `localStorage`, deci rămân de la o sesiune la alta.
 
-O rulare folosește mai multe conexiuni WebSocket cu același ID de sesiune:
-
-- **control** — una singură. Duce PING/PONG pe toată durata rulării, inclusiv
-  *în timpul* fazelor de încărcare. Aici nu circulă date în vrac, ceea ce e
-  exact motivul pentru care un ping poate trece în timp ce legătura e saturată.
-- **stream** — 1, 4 sau 8. Duc doar datele de test.
-- **observer** — oricâte, niciodată blocate. Primesc progresul retransmis, ca
-  al doilea ecran să deseneze același grafic.
-
-## Moduri de rulare
+### Cele două moduri
 
 | | Automat | Manual |
 |---|---------|--------|
@@ -292,41 +280,198 @@ O rulare compară doar cu rulări de aceeași formă — același mod, aceeași
 direcție, aceeași rețea. Un download manual de 4 minute și o rulare automată de
 10 s în ambele sensuri nu măsoară același lucru.
 
-## Setările rețelei laptopului
+### Al doilea ecran
 
-Ecranul de start arată cum e conectat calculatorul pe care rulează serverul:
-cablu sau Wi-Fi, iar dacă e Wi-Fi — SSID, bandă, canal, lățime de canal,
-standard 802.11, semnal, securitate, BSSID și rata radio negociată. Aceleași
-date se salvează cu fiecare rulare și apar sub „Avansat", pentru că **același
-SSID pe 2.4 GHz și pe 5 GHz sunt rețele diferite** din punct de vedere al
-debitului, iar o rulare fără contextul ăsta nu se poate interpreta mai târziu.
+Fereastra desktop nu e doar un loc unde ții codul QR. Cât timp telefonul
+testează, laptopul **oglindește** același grafic live, prin progresul retransmis
+de server. Un al treilea dispozitiv care are pagina deschisă vede și el aceeași
+rulare, cu mențiunea „Rulează pe alt dispozitiv".
 
-Detecția e best effort și diferă per sistem:
+Ecranul de start arată și starea telefonului: „Aștept telefonul…", apoi
+„Conectat: Android / Chrome — apasă Pornește pe telefon" din momentul în care
+telefonul deschide pagina, apoi „Testează: Android / Chrome" în timpul rulării.
 
-| Sistem | Unealtă | Ce obține |
-|--------|---------|-----------|
-| **Linux** | `iw dev <if> link`, completat cu `nmcli` | SSID, BSSID, frecvență, semnal în dBm, rate, lățime; securitate din nmcli |
-| **macOS** | `system_profiler SPAirPortDataType` | SSID, standard PHY, canal + bandă + lățime, securitate, semnal/zgomot, rată |
-| **Windows** | `netsh wlan show interfaces` | SSID, BSSID, tip radio, bandă, canal, rate, semnal în procente |
-| Cablu, Linux | `/sys/class/net/<if>/speed` și `/duplex` | viteza portului și duplex |
-| Cablu, macOS | `networksetup -getmedia` | la fel |
+Dacă două dispozitive apasă Start simultan, al doilea primește un refuz explicit
+și trece în modul oglindă. Vezi [Securitate](#securitate) pentru de ce nu se pot
+rula două teste odată.
 
-Ce nu se poate citi lipsește pur și simplu; nimic de aici nu poate opri
-aplicația. Banda și canalul se derivă din frecvență când unealta dă doar
-frecvența — cele trei benzi își numerotează canalele de la ancore diferite, așa
-că nu e o singură formulă.
+### Graficul interactiv
 
-Două lucruri de reținut:
+Graficul nu e doar o imagine. Trage peste el ca să mărești un interval, folosește
+rotița ca să mărești în jurul cursorului, dublu-clic (sau dublu-tap) ca să revii
+la toată rularea. Cursorul afișează valorile exacte din punctul respectiv:
+momentul, throughput-ul și latența.
 
-- **Rata radio nu e o măsurătoare.** E viteza negociată a legăturii, adică
-  plafonul teoretic. Testul măsoară ce livrează efectiv rețeaua, și e normal să
-  fie considerabil mai mică.
-- **Sondarea nu atinge niciodată un test.** Se face la pornire și apoi în fundal
-  la 30 s, iar rezultatul e păstrat în cache; `system_profiler` poate dura
-  secunde, și nici încărcarea paginii nici finalul unui test nu au voie să
-  aștepte după el.
+Zoom-ul nu e doar vizual — **scările verticale și decimarea se recalculează din
+fereastra vizibilă**. Într-o rulare de câteva minute, graficul complet e redus la
+900 de puncte (păstrând vârful fiecărui interval); dacă mărești pe 5 secunde,
+vezi eșantioanele individuale, marcate cu puncte. Asta e diferența dintre a
+mări o imagine și a rezolva detaliu.
 
-## Ce măsoară, și cum
+Pe telefon, tragerea orizontală aparține graficului, iar cea verticală derulează
+pagina în continuare.
+
+Zoom-ul schimbă **doar imaginea**. Cifrele din carduri și din verdict se
+calculează întotdeauna pe toată rularea — de asta scrie asta lângă grafic când e
+mărit. Exportul PNG păstrează intervalul afișat și notează în subsol care e.
+
+### Istoric și comparație
+
+Fiecare rulare se salvează în directorul de configurare al utilizatorului
+(`~/.config/lantest/history.json` pe Linux, echivalentul pe macOS/Windows),
+maxim 200 de rulări. Rularea nouă se compară automat cu ultima rulare validă de
+pe **aceeași rețea** — identificată prin SSID când se poate citi, altfel prin
+subnet. Rulările întrerupte nu sunt folosite ca referință.
+
+### Export
+
+- **JSON** — `schema_version: 1`, rularea completă, rularea anterioară pe aceeași
+  rețea, plus o secțiune `method` cu warmup-ul eliminat, lățimea ferestrei și
+  care capăt a măsurat fiecare direcție.
+- **PNG** — o imagine de sine stătătoare cu verdictul, cifrele și graficul,
+  randată pe fundal deschis indiferent de tema aplicației.
+
+În fereastra desktop se deschide dialogul nativ de salvare; în browser se
+descarcă normal.
+
+## Arhitectură
+
+Un singur binar Go. Frontend-ul e unul singur, embed-uit cu `go:embed`, și
+rulează identic în ambele locuri pentru că **nu folosește bindings Wails pentru
+nimic din ce se măsoară** — vorbește exclusiv WebSocket cu serverul local:
+
+```
+fereastra desktop ──► http.Handler ──► ws://127.0.0.1:8080/ws
+telefon (browser) ──► http.Handler ──► ws://192.168.x.x:8080/ws
+                       (același)          (același protocol)
+```
+
+Bindings-urile Wails există doar pentru ce un tab de browser nu poate face:
+dialogul nativ de salvare și deschiderea unui link în browserul sistemului.
+Ambele sunt feature-detected, deci lipsa lor nu schimbă nimic pe telefon.
+
+### Modelul de conexiuni
+
+O rulare folosește mai multe conexiuni WebSocket cu același ID de sesiune,
+generat de client. Prima cerere pe fiecare conexiune trebuie să fie un `HELLO`
+care declară rolul:
+
+| Rol | Câte | Ce duce |
+|---|---|---|
+| **control** | exact una | PING/PONG pe toată durata rulării, progresul retransmis, rezultatul final. Ocuparea acestui rol ia lacătul de test unic. |
+| **stream** | 1, 4 sau 8 | doar date în vrac |
+| **observer** | oricâte | evenimente de stare și progres; niciodată blocat de lacăt |
+
+Separarea nu e cosmetică: pe conexiunea de control **nu circulă date în vrac**,
+și exact de asta un ping poate primi răspuns în timp ce legătura e saturată. Dacă
+ping-urile ar merge pe aceeași conexiune cu datele, ar sta la coadă în spatele
+lor și ar măsura coada, nu rețeaua.
+
+### Ciclul unei rulări
+
+```
+client                                            server
+  │                                                 │
+  │  HELLO (control, sessionId, mod, direcție)      │
+  ├────────────────────────────────────────────────►│  ia lacătul de test
+  │◄────────────────────────────────────────────────┤  HELLO_ACK
+  │                                                 │
+  │  HELLO (stream #0..#N)                          │
+  ├────────────────────────────────────────────────►│  leagă streamurile de sesiune
+  │◄────────────────────────────────────────────────┤  HELLO_ACK ×N
+  │                                                 │
+  │  ── faza 1: latență în repaus ──                │
+  │  PING ×50, la 20 ms                             │
+  ├────────────────────────────────────────────────►│  ecou imediat
+  │◄────────────────────────────────────────────────┤  PONG ×50
+  │                                                 │
+  │  ── faza 2: download ──                         │
+  │  DOWN_START pe fiecare stream                   │
+  ├────────────────────────────────────────────────►│  ┌ afișează antetul rulării
+  │◄══════ DOWN_DATA ×mii ═══════════════════════════┤  │ scrie din bufferul aleator
+  │  PING la 100 ms ──────────────────────────────► │  │ (pe conexiunea de control)
+  │◄────────────────────────────────────────────────┤  │ PONG
+  │◄────────────────────────────────────────────────┤  └ DOWN_DONE + tabel per stream
+  │                                                 │
+  │  ── faza 3: upload ──                           │
+  │  UP_START pe fiecare stream                     │
+  ├────────────────────────────────────────────────►│
+  ├══════ UP_DATA ×mii ═════════════════════════════►│  numără în ferestre aliniate
+  │  PING la 100 ms ──────────────────────────────► │
+  │  UP_DONE ───────────────────────────────────────►│
+  │◄────────────────────────────────────────────────┤  RESULT (agregat) + tabel
+  │                                                 │
+  │  FINAL (eșantioane brute, RTT-uri brute)        │
+  ├────────────────────────────────────────────────►│  taie warmup, calculează
+  │◄────────────────────────────────────────────────┤  STORED (rulare + precedenta)
+  │                                                 │
+  └── închide conexiunile ─────────────────────────►│  eliberează lacătul
+```
+
+În modul manual, faza de încărcare nu are durată: se termină când operatorul
+apasă Stop. Download-ul se oprește pe server (bucla de trimitere verifică un flag
+între cadre), upload-ul se oprește pe client.
+
+### Protocolul pe fir
+
+Cadre WebSocket binare. Octetul 0 e tipul mesajului, restul e încărcătura:
+
+| Cod | Mesaj | Direcție | Încărcătură |
+|---|---|---|---|
+| `0x01` | `PING` | C→S | timestamp float64, 8 octeți |
+| `0x02` | `PONG` | S→C | ecou exact al PING-ului |
+| `0x03` | `DOWN_START` | C→S | JSON: durată, dimensiune cadru, manual |
+| `0x04` | `DOWN_DATA` | S→C | octeți din bufferul preîncărcat |
+| `0x05` | `DOWN_DONE` | S→C | JSON: contorul serverului pentru acest stream |
+| `0x06` | `UP_START` | C→S | JSON: durată, manual |
+| `0x07` | `UP_DATA` | C→S | octeți de test |
+| `0x08` | `UP_DONE` | C→S | (gol) |
+| `0x09` | `RESULT` | S→C | JSON: upload agregat pe streamuri |
+| `0x0A` | `ABORT` | ambele | (gol) |
+| `0x0B` | `HELLO` | C→S | JSON: sesiune, rol, index, mod, direcție |
+| `0x0C` | `HELLO_ACK` | S→C | JSON: confirmare |
+| `0x0D` | `BUSY` | S→C | JSON: motivul refuzului |
+| `0x0E` | `PROGRESS` | C→S | JSON: metrici live, retransmise observatorilor |
+| `0x0F` | `OBSERVE` | S→C | JSON: eveniment pentru al doilea ecran |
+| `0x10` | `FINAL` | C→S | JSON: măsurători brute |
+| `0x11` | `STORED` | S→C | JSON: rularea salvată + cea precedentă |
+| `0x12` | `STOP` | C→S | (gol) — încheie o rulare manuală |
+
+De ce binar și nu JSON peste tot: `DOWN_DATA` și `UP_DATA` sunt zeci de mii de
+cadre pe rulare. Un prefix de un octet costă nimic; JSON ar costa CPU care s-ar
+scădea din ce se măsoară.
+
+### Endpoint-uri HTTP
+
+Aceleași pe toate listener-ele — LAN, loopback, și fereastra desktop:
+
+| Rută | Ce întoarce |
+|---|---|
+| `/` | frontend-ul embed-uit |
+| `/ws` | protocolul de test (WebSocket) |
+| `/config.js` | configurația injectată în pagină: port, streamuri implicite, warmup |
+| `/api/urls` | adresele LAN pe care le poate folosi telefonul |
+| `/api/link` | cum e conectat laptopul (cache, vezi [mai jos](#setările-rețelei-laptopului)) |
+| `/api/history` | rulările salvate (doar citire) |
+| `/qr.png` | codul QR ca imagine |
+
+Codul QR e randat de **server**, nu de o bibliotecă JavaScript. Așa se respectă
+promisiunea „zero CDN, fără build step" fără să bagi câteva mii de linii de
+encoder în pagină.
+
+### Cele două shell-uri
+
+Aceeași bază de cod produce două binare diferite, alese prin build tags:
+
+| Build | Tag | Ce face | Are nevoie de |
+|---|---|---|---|
+| implicit | — | pornește serverul, afișează bannerul, așteaptă Ctrl-C | nimic |
+| desktop | `desktop,production` | deschide o fereastră Wails care servește **același** `http.Handler` | CGO + webview nativ |
+
+Motivul pentru care implicitul e cel fără fereastră: `go build ./...`, `go vet`
+și `go test` trebuie să meargă pe orice mașină și în CI, fără GTK instalat.
+
+## Metodologia măsurătorii
 
 | Metrică | Metodă |
 |---------|--------|
@@ -355,26 +500,6 @@ o prăbușire de throughput care nu a existat.
 
 Se raportează percentile, niciodată medii goale: o singură fereastră blocată
 strică o medie.
-
-### Grafic interactiv
-
-Graficul nu e doar o imagine. Trage peste el ca să mărești un interval, folosește
-rotița ca să mărești în jurul cursorului, dublu-clic (sau dublu-tap) ca să revii
-la toată rularea. Cursorul afișează valorile exacte din punctul respectiv:
-momentul, throughput-ul și latența.
-
-Zoom-ul nu e doar vizual — **scările verticale și decimarea se recalculează din
-fereastra vizibilă**. Într-o rulare de câteva minute, graficul complet e redus la
-900 de puncte (păstrând vârful fiecărui interval); dacă mărești pe 5 secunde,
-vezi eșantioanele individuale, marcate cu puncte. Asta e diferența dintre a
-mări o imagine și a rezolva detaliu.
-
-Pe telefon, tragerea orizontală aparține graficului, iar cea verticală derulează
-pagina în continuare.
-
-Zoom-ul schimbă **doar imaginea**. Cifrele din carduri și din verdict se
-calculează întotdeauna pe toată rularea — de asta scrie asta lângă grafic când e
-mărit. Exportul PNG păstrează intervalul afișat și notează în subsol care e.
 
 ### „Cadre", nu pachete
 
@@ -421,24 +546,39 @@ dus-întors bruți; serverul face tăierea, percentilele și notarea. Așa nu ex
 o implementare în Go și una în JavaScript care să divergă, iar telefonul,
 fereastra desktop și fișierul de istoric nu pot fi în dezacord.
 
-## Istoric și comparație
+## Setările rețelei laptopului
 
-Fiecare rulare se salvează în directorul de configurare al utilizatorului
-(`~/.config/lantest/history.json` pe Linux, echivalentul pe macOS/Windows),
-maxim 200 de rulări. Rularea nouă se compară automat cu ultima rulare validă de
-pe **aceeași rețea** — identificată prin SSID când se poate citi, altfel prin
-subnet. Rulările întrerupte nu sunt folosite ca referință.
+Ecranul de start arată cum e conectat calculatorul pe care rulează serverul:
+cablu sau Wi-Fi, iar dacă e Wi-Fi — SSID, bandă, canal, lățime de canal,
+standard 802.11, semnal, securitate, BSSID și rata radio negociată. Aceleași
+date se salvează cu fiecare rulare și apar sub „Avansat", pentru că **același
+SSID pe 2.4 GHz și pe 5 GHz sunt rețele diferite** din punct de vedere al
+debitului, iar o rulare fără contextul ăsta nu se poate interpreta mai târziu.
 
-## Export
+Detecția e best effort și diferă per sistem:
 
-- **JSON** — `schema_version: 1`, rularea completă, rularea anterioară pe aceeași
-  rețea, plus o secțiune `method` cu warmup-ul eliminat, lățimea ferestrei și
-  care capăt a măsurat fiecare direcție.
-- **PNG** — o imagine de sine stătătoare cu verdictul, cifrele și graficul,
-  randată pe fundal deschis indiferent de tema aplicației.
+| Sistem | Unealtă | Ce obține |
+|--------|---------|-----------|
+| **Linux** | `iw dev <if> link`, completat cu `nmcli` | SSID, BSSID, frecvență, semnal în dBm, rate, lățime; securitate din nmcli |
+| **macOS** | `system_profiler SPAirPortDataType` | SSID, standard PHY, canal + bandă + lățime, securitate, semnal/zgomot, rată |
+| **Windows** | `netsh wlan show interfaces` | SSID, BSSID, tip radio, bandă, canal, rate, semnal în procente |
+| Cablu, Linux | `/sys/class/net/<if>/speed` și `/duplex` | viteza portului și duplex |
+| Cablu, macOS | `networksetup -getmedia` | la fel |
 
-În fereastra desktop se deschide dialogul nativ de salvare; în browser se
-descarcă normal.
+Ce nu se poate citi lipsește pur și simplu; nimic de aici nu poate opri
+aplicația. Banda și canalul se derivă din frecvență când unealta dă doar
+frecvența — cele trei benzi își numerotează canalele de la ancore diferite, așa
+că nu e o singură formulă.
+
+Două lucruri de reținut:
+
+- **Rata radio nu e o măsurătoare.** E viteza negociată a legăturii, adică
+  plafonul teoretic. Testul măsoară ce livrează efectiv rețeaua, și e normal să
+  fie considerabil mai mică.
+- **Sondarea nu atinge niciodată un test.** Se face la pornire și apoi în fundal
+  la 30 s, iar rezultatul e păstrat în cache; `system_profiler` poate dura
+  secunde, și nici încărcarea paginii nici finalul unui test nu au voie să
+  aștepte după el.
 
 ## Limitările reale ale metodei
 
